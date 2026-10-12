@@ -17,7 +17,6 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const macos = @import("macos");
 const codes = @import("keycodes.zig").entries;
-const Key = @import("key.zig").Key;
 const Mods = @import("key.zig").Mods;
 
 /// The current input source that is selected for the keyboard. This can
@@ -195,7 +194,7 @@ pub fn translate(
     } else false;
 
     // Convert the utf16 to utf8
-    const len = try std.unicode.utf16leToUtf8(out, char[0..char_count]);
+    const len = try std.unicode.utf16LeToUtf8(out, char[0..char_count]);
     return .{
         .text = out[0..len],
         .composing = composing,

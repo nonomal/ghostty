@@ -1,6 +1,6 @@
 const std = @import("std");
-const assert = std.debug.assert;
 const font = @import("../main.zig");
+const compat_reader = @import("../../lib/compat/reader.zig");
 
 /// SVG glyphs description table.
 ///
@@ -22,27 +22,24 @@ pub const SVG = struct {
     /// All records in the table.
     records: []const [12]u8,
 
-    pub fn init(data: []const u8) error{
-        EndOfStream,
-        SVGVersionNotSupported,
-    }!SVG {
-        var fbs = std.io.fixedBufferStream(data);
-        const reader = fbs.reader();
+    pub fn init(data: []const u8) (error{SVGVersionNotSupported} || std.Io.Reader.Error)!SVG {
+        var reader: std.Io.Reader = .fixed(data);
 
         // Version
-        if (try reader.readInt(u16, .big) != 0) {
+        if (try compat_reader.readerInt(&reader, u16, .big) != 0) {
             return error.SVGVersionNotSupported;
         }
 
         // Offset
-        const offset = try reader.readInt(u32, .big);
+        const offset = try compat_reader.readerInt(&reader, u32, .big);
 
         // Seek to the offset to get our document list
-        try fbs.seekTo(offset);
+        if (offset > data.len) return error.EndOfStream;
+        reader.seek = offset;
 
         // Get our document records along with the start/end glyph range.
-        const len = try reader.readInt(u16, .big);
-        const records: [*]const [12]u8 = @ptrCast(data[try fbs.getPos()..]);
+        const len = try compat_reader.readerInt(&reader, u16, .big);
+        const records: [*]const [12]u8 = @ptrCast(data[reader.seek..]);
         const start_range = try glyphRange(&records[0]);
         const end_range = if (len == 1) start_range else try glyphRange(&records[(len - 1)]);
 
@@ -67,14 +64,13 @@ pub const SVG = struct {
         // Slow path: binary search our records
         return std.sort.binarySearch(
             [12]u8,
-            glyph_id,
             self.records,
-            {},
+            glyph_id,
             compareGlyphId,
         ) != null;
     }
 
-    fn compareGlyphId(_: void, glyph_id: u16, record: [12]u8) std.math.Order {
+    fn compareGlyphId(glyph_id: u16, record: [12]u8) std.math.Order {
         const start, const end = glyphRange(&record) catch return .lt;
         if (glyph_id < start) {
             return .lt;
@@ -86,11 +82,10 @@ pub const SVG = struct {
     }
 
     fn glyphRange(record: []const u8) !struct { u16, u16 } {
-        var fbs = std.io.fixedBufferStream(record);
-        const reader = fbs.reader();
+        var reader: std.Io.Reader = .fixed(record);
         return .{
-            try reader.readInt(u16, .big),
-            try reader.readInt(u16, .big),
+            try compat_reader.readerInt(&reader, u16, .big),
+            try compat_reader.readerInt(&reader, u16, .big),
         };
     }
 };
@@ -100,7 +95,7 @@ test "SVG" {
     const alloc = testing.allocator;
     const testFont = font.embedded.julia_mono;
 
-    var lib = try font.Library.init();
+    var lib = try font.Library.init(alloc);
     defer lib.deinit();
 
     var face = try font.Face.init(lib, testFont, .{ .size = .{ .points = 12 } });
@@ -113,4 +108,14 @@ test "SVG" {
     try testing.expectEqual(11482, svg.start_glyph_id);
     try testing.expectEqual(11482, svg.end_glyph_id);
     try testing.expect(svg.hasGlyph(11482));
+}
+
+test "SVG document list offset past end" {
+    const testing = std.testing;
+    const table = [_]u8{
+        0, 0, // Version
+        0, 0, 0, 7, // Document list offset, one byte past end
+    };
+
+    try testing.expectError(error.EndOfStream, SVG.init(&table));
 }

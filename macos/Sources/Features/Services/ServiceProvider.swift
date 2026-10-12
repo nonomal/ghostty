@@ -5,7 +5,7 @@ class ServiceProvider: NSObject {
     static private let errorNoString = NSString(string: "Could not load any text from the clipboard.")
 
     /// The target for an open operation
-    enum OpenTarget {
+    private enum OpenTarget {
         case tab
         case window
     }
@@ -15,7 +15,7 @@ class ServiceProvider: NSObject {
         userData: String?,
         error: AutoreleasingUnsafeMutablePointer<NSString>
     ) {
-        openTerminalFromPasteboard(pasteboard: pasteboard, target: .tab, error: error)
+        openTerminal(from: pasteboard, target: .tab, error: error)
     }
 
     @objc func openWindow(
@@ -23,45 +23,53 @@ class ServiceProvider: NSObject {
         userData: String?,
         error: AutoreleasingUnsafeMutablePointer<NSString>
     ) {
-        openTerminalFromPasteboard(pasteboard: pasteboard, target: .window, error: error)
+        openTerminal(from: pasteboard, target: .window, error: error)
     }
 
-    @inline(__always)
-    private func openTerminalFromPasteboard(
-        pasteboard: NSPasteboard,
+    private func openTerminal(
+        from pasteboard: NSPasteboard,
         target: OpenTarget,
         error: AutoreleasingUnsafeMutablePointer<NSString>
     ) {
-        guard let objs = pasteboard.readObjects(forClasses: [NSURL.self]) as? [NSURL] else {
+        guard let delegate = NSApp.delegate as? AppDelegate else { return }
+
+        guard let pathURLs = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] else {
             error.pointee = Self.errorNoString
             return
         }
-        let filePaths = objs.map { $0.path }.compactMap { $0 }
 
-        openTerminal(filePaths, target: target)
-    }
+        // Build a set of unique directory URLs to open. File paths are truncated
+        // to their directories because that's the only thing we can open.
+        let directoryURLs = Set(
+            pathURLs.map { url -> URL in
+                /// We check file system resources here because
+                /// NSURL doesn't append `/` when reading string contents from pasteboard
+                ///     ```
+                ///     NSURL(pasteboardPropertyList: "/System/Library".propertyList(), ofType: .fileURL)?.hasDirectoryPath
+                ///     ```
+                let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? url.hasDirectoryPath
+                return isDirectory ? url : url.deletingLastPathComponent()
+            }
+        )
 
-    private func openTerminal(_ paths: [String], target: OpenTarget) {
-        guard let delegateRaw = NSApp.delegate else { return }
-        guard let delegate = delegateRaw as? AppDelegate else { return }
-        let terminalManager = delegate.terminalManager
+        guard !directoryURLs.isEmpty else {
+            error.pointee = Self.errorNoString
+            return
+        }
 
-        for path in paths {
-            // We only open in directories.
-            var isDirectory = ObjCBool(true)
-            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else { continue }
-            guard isDirectory.boolValue else { continue }
-
-            // Build our config
+        for url in directoryURLs {
             var config = Ghostty.SurfaceConfiguration()
-            config.workingDirectory = path
+            config.workingDirectory = url.pathWithoutTrailingSlash
 
-            switch (target) {
+            switch target {
             case .window:
-                terminalManager.newWindow(withBaseConfig: config)
+                _ = TerminalController.newWindow(delegate.ghostty, withBaseConfig: config)
 
             case .tab:
-                terminalManager.newTab(withBaseConfig: config)
+                _ = TerminalController.newTab(
+                    delegate.ghostty,
+                    from: TerminalController.preferredParent?.window,
+                    withBaseConfig: config)
             }
         }
 

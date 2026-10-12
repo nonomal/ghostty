@@ -5,64 +5,71 @@ const Config = @import("Config.zig");
 const SharedDeps = @import("SharedDeps.zig");
 const GhosttyLib = @import("GhosttyLib.zig");
 const XCFrameworkStep = @import("XCFrameworkStep.zig");
+const Target = @import("xcframework.zig").Target;
 
 xcframework: *XCFrameworkStep,
-macos: GhosttyLib,
+target: Target,
 
-pub fn init(b: *std.Build, deps: *const SharedDeps) !GhosttyXCFramework {
-    // Create our universal macOS static library.
-    const macos = try GhosttyLib.initMacOSUniversal(b, deps);
+pub fn init(
+    b: *std.Build,
+    deps: *const SharedDeps,
+    target: Target,
+) !GhosttyXCFramework {
+    // Universal macOS build
+    const macos_universal = try GhosttyLib.initMacOSUniversal(b, deps);
 
-    // iOS
-    const ios = try GhosttyLib.initStatic(b, &try deps.retarget(
+    // Native macOS build
+    const macos_native = try GhosttyLib.initStatic(b, &try deps.retarget(
         b,
-        b.resolveTargetQuery(.{
-            .cpu_arch = .aarch64,
-            .os_tag = .ios,
-            .os_version_min = Config.osVersionMin(.ios),
-            .abi = null,
-        }),
+        Config.genericMacOSTarget(b, null),
     ));
 
-    // iOS Simulator
-    const ios_sim = try GhosttyLib.initStatic(b, &try deps.retarget(
-        b,
-        b.resolveTargetQuery(.{
-            .cpu_arch = .aarch64,
-            .os_tag = .ios,
-            .os_version_min = Config.osVersionMin(.ios),
-            .abi = .simulator,
-        }),
-    ));
+    // Generate a headers directory with only ghostty.h and the module
+    // map. We can't use include/ directly because it also contains the
+    // libghostty-vt headers under include/ghostty/, which would trigger
+    // "umbrella header does not include header" warnings from Clang's
+    // module system.
+    const wf = b.addWriteFiles();
+    _ = wf.addCopyFile(b.path("include/ghostty.h"), "ghostty.h");
+    _ = wf.addCopyFile(b.path("include/module.modulemap"), "module.modulemap");
+    const headers = wf.getDirectory();
 
     // The xcframework wraps our ghostty library so that we can link
     // it to the final app built with Swift.
     const xcframework = XCFrameworkStep.create(b, .{
         .name = "GhosttyKit",
         .out_path = "macos/GhosttyKit.xcframework",
-        .libraries = &.{
-            .{
-                .library = macos.output,
-                .headers = b.path("include"),
+        .libraries = switch (target) {
+            .universal => &.{
+                .{
+                    .library = macos_universal.output,
+                    .headers = headers,
+                    .dsym = macos_universal.dsym,
+                },
             },
-            .{
-                .library = ios.output,
-                .headers = b.path("include"),
-            },
-            .{
-                .library = ios_sim.output,
-                .headers = b.path("include"),
-            },
+
+            .native => &.{.{
+                .library = macos_native.output,
+                .headers = headers,
+                .dsym = macos_native.dsym,
+            }},
         },
     });
 
     return .{
         .xcframework = xcframework,
-        .macos = macos,
+        .target = target,
     };
 }
 
 pub fn install(self: *const GhosttyXCFramework) void {
     const b = self.xcframework.step.owner;
-    b.getInstallStep().dependOn(self.xcframework.step);
+    self.addStepDependencies(b.getInstallStep());
+}
+
+pub fn addStepDependencies(
+    self: *const GhosttyXCFramework,
+    other_step: *std.Build.Step,
+) void {
+    other_step.dependOn(self.xcframework.step);
 }

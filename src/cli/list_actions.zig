@@ -1,8 +1,9 @@
 const std = @import("std");
 const args = @import("args.zig");
-const Action = @import("action.zig").Action;
+const Action = @import("ghostty.zig").Action;
 const Allocator = std.mem.Allocator;
 const helpgen_actions = @import("../input/helpgen_actions.zig");
+const global = @import("../global.zig");
 
 pub const Options = struct {
     /// If `true`, print out documentation about the action associated with the
@@ -32,13 +33,21 @@ pub fn run(alloc: Allocator) !u8 {
     defer opts.deinit();
 
     {
-        var iter = try args.argsIterator(alloc);
+        var iter = try args.argsIterator(alloc, global.args());
         defer iter.deinit();
         try args.parse(Options, alloc, &opts, &iter);
     }
 
-    const stdout = std.io.getStdOut().writer();
-    try helpgen_actions.generate(stdout, .plaintext, opts.docs, std.heap.page_allocator);
+    var stdout: std.Io.File = .stdout();
+    var buffer: [4096]u8 = undefined;
+    var stdout_writer = stdout.writer(global.io(), &buffer);
+    try helpgen_actions.generate(
+        &stdout_writer.interface,
+        .plaintext,
+        opts.docs,
+        std.heap.page_allocator,
+    );
+    try stdout_writer.interface.flush();
 
     return 0;
 }

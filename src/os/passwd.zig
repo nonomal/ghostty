@@ -5,29 +5,26 @@ const build_config = @import("../build_config.zig");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const posix = std.posix;
+const compat_fd = @import("../lib/compat/fd.zig");
 
 const log = std.log.scoped(.passwd);
 
 // We want to be extra sure since this will force bad symbols into our import table
 comptime {
-    if (builtin.target.isWasm()) {
+    if (builtin.target.cpu.arch.isWasm()) {
         @compileError("passwd is not available for wasm");
     }
 }
 
 /// Used to determine the default shell and directory on Unixes.
-const c = if (builtin.os.tag != .windows) @cImport({
-    @cInclude("sys/types.h");
-    @cInclude("unistd.h");
-    @cInclude("pwd.h");
-}) else {};
+const c = if (builtin.os.tag != .windows) @import("posix_c") else {};
 
 // Entry that is retrieved from the passwd API. This only contains the fields
 // we care about.
 pub const Entry = struct {
-    shell: ?[]const u8 = null,
-    home: ?[]const u8 = null,
-    name: ?[]const u8 = null,
+    shell: ?[:0]const u8 = null,
+    home: ?[:0]const u8 = null,
+    name: ?[:0]const u8 = null,
 };
 
 /// Get the passwd entry for the currently executing user.
@@ -89,11 +86,11 @@ pub fn get(alloc: Allocator) !Entry {
         // Once started, we can close the child side. We do this after
         // wait right now but that is fine too. This lets us read the
         // parent and detect EOF.
-        _ = posix.close(pty.slave);
+        _ = compat_fd.close(pty.slave);
 
         // Read all of our output
         const output = output: {
-            var output: std.ArrayListUnmanaged(u8) = .{};
+            var output: std.ArrayListUnmanaged(u8) = .empty;
             while (true) {
                 const n = posix.read(pty.master, &buf) catch |err| {
                     switch (err) {
@@ -116,31 +113,28 @@ pub fn get(alloc: Allocator) !Entry {
         };
 
         // Shell and home are the last two entries
-        var it = std.mem.splitBackwards(u8, std.mem.trimRight(u8, output, " \r\n"), ":");
-        result.shell = it.next() orelse null;
-        result.home = it.next() orelse null;
+        var it = std.mem.splitBackwardsScalar(u8, std.mem.trimEnd(u8, output, " \r\n"), ':');
+        result.shell = if (it.next()) |v| try alloc.dupeZ(u8, v) else null;
+        result.home = if (it.next()) |v| try alloc.dupeZ(u8, v) else null;
         return result;
     }
 
     if (pw.pw_shell) |ptr| {
         const source = std.mem.sliceTo(ptr, 0);
-        const sh = try alloc.alloc(u8, source.len);
-        @memcpy(sh, source);
-        result.shell = sh;
+        const value = try alloc.dupeZ(u8, source);
+        result.shell = value;
     }
 
     if (pw.pw_dir) |ptr| {
         const source = std.mem.sliceTo(ptr, 0);
-        const dir = try alloc.alloc(u8, source.len);
-        @memcpy(dir, source);
-        result.home = dir;
+        const value = try alloc.dupeZ(u8, source);
+        result.home = value;
     }
 
     if (pw.pw_name) |ptr| {
         const source = std.mem.sliceTo(ptr, 0);
-        const name = try alloc.alloc(u8, source.len);
-        @memcpy(name, source);
-        result.name = name;
+        const value = try alloc.dupeZ(u8, source);
+        result.name = value;
     }
 
     return result;

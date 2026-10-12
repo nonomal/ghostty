@@ -4,13 +4,12 @@ Ghostty relies on downstream package maintainers to distribute Ghostty to
 end-users. This document provides guidance to package maintainers on how to
 package Ghostty for distribution.
 
-> [!NOTE]
+> [!IMPORTANT]
 >
-> While Ghostty went through an extensive private beta testing period,
-> packaging Ghostty is immature and may require additional build script
-> tweaks and documentation improvement. I'm extremely motivated to work with
-> package maintainers to improve the packaging process. Please open issues
-> to discuss any packaging issues you encounter.
+> This document is only accurate for the Ghostty source alongside it.
+> **Do not use this document for older or newer versions of Ghostty!** If
+> you are reading this document in a different version of Ghostty, please
+> find the `PACKAGING.md` file alongside that version.
 
 ## Source Tarballs
 
@@ -37,6 +36,19 @@ Use the `ghostty-source.tar.gz` asset and _not the GitHub auto-generated
 source tarball_. These tarballs are generated for every commit to
 the `main` branch and are not associated with a specific version.
 
+> [!WARNING]
+>
+> Source tarballs are _not the same_ as a Git checkout. Source tarballs
+> contain some preprocessed files that allow building Ghostty with less
+> dependencies. If you are building Ghostty from a Git checkout, the
+> steps below are the same but they may require additional dependencies
+> not listed here. See the `README.md` for more information on building
+> from a Git checkout.
+>
+> For everyone except Ghostty developers, please use the source tarballs.
+> We generate tip source tarballs for users following the development
+> branch.
+
 ## Zig Version
 
 [Zig](https://ziglang.org) is required to build Ghostty. Prior to Zig 1.0,
@@ -48,7 +60,7 @@ To find the version of Zig required to build Ghostty, check the `required_zig`
 constant in `build.zig`. You don't need to know Zig to extract this information.
 This version will always be an official released version of Zig.
 
-For example, at the time of writing this document, Ghostty requires Zig 0.13.0.
+For example, at the time of writing this document, Ghostty requires Zig 0.14.0.
 
 ## Building Ghostty
 
@@ -81,13 +93,6 @@ for system packages which separate a build and install step, since the
 install step can then be done with a `mv` or `cp` command (from `/tmp/ghostty`
 to wherever the package manager expects it).
 
-> [!NOTE]
->
-> **Version 1.1.1 and 1.1.2 are missing `fetch-zig-cache.sh`.** This was
-> an oversight on the release process. You can use the script from version
-> 1.1.0 to fetch the Zig cache for these versions. Future versions will
-> restore the script.
-
 ### Build Options
 
 Ghostty uses the Zig build system. You can see all available build options by
@@ -118,10 +123,55 @@ relevant to package maintainers:
   version, glibc, etc. Run `zig targets` to a get a full list of available
   targets.
 
-> [!WARNING]
->
-> **The GLFW runtime is not meant for distribution.** The GLFW runtime
-> (`-Dapp-runtime=glfw`) is meant for development and testing only. It is
-> missing many features, has known memory leak scenarios, known crashes,
-> and more. Please do not package the GLFW-based Ghostty runtime for
-> distribution.
+## WebAssembly (libghostty-vt)
+
+libghostty-vt can be built for WebAssembly for use in browsers and other
+wasm runtimes:
+
+```sh
+zig build -Demit-lib-vt -Dtarget=wasm32-freestanding -Doptimize=ReleaseSmall
+```
+
+This produces `zig-out/bin/ghostty-vt.wasm`.
+
+Some notes for packaging the wasm module:
+
+- The build enables the `simd128` feature by default. Every browser engine
+  has supported it for years (Chrome 91, Firefox 89, Safari 16.4) and it is
+  a large performance win for VT parsing. If you target an unusual runtime
+  without SIMD support, opt out with `-Dcpu=generic`.
+
+- Optional feature areas can be compiled out with `-Dvt-features` to
+  significantly reduce binary size. The flag takes comma-separated
+  modifications applied to the default all-enabled feature set,
+  `-Dcpu`-style: `+feature` (or bare `feature`) enables, `-feature`
+  disables, and the special name `all` refers to every feature. Hyphens
+  and underscores are interchangeable in feature names. For example, a
+  read-only terminal viewer only needs the render state API:
+
+  ```sh
+  zig build -Demit-lib-vt -Dtarget=wasm32-freestanding \
+    -Doptimize=ReleaseSmall -Dvt-features=-all,+render-state
+  ```
+
+  This roughly halves the compressed module size versus the default
+  build. An interactive terminal typically wants
+  `-Dvt-features=-all,+render-state,+input-encode,+selection,+color`.
+  Disabled features drop both their C API exports and any escape
+  sequence handling (the sequences are still consumed and safely
+  ignored). See the `Features` struct in `src/terminal/build_options.zig`
+  for the full list of features and what each one covers.
+
+- `ReleaseSmall` is the recommended optimization mode for the web. Running
+  the result through [Binaryen's](https://github.com/WebAssembly/binaryen)
+  `wasm-opt -O3` shrinks it by roughly a further 10% without hurting
+  performance.
+
+- `ReleaseFast` measures 10-20% faster than `ReleaseSmall` on escape-heavy
+  terminal workloads, but the artifact is dominated by DWARF debug info.
+  If you want the speed, strip it: `wasm-opt -O3 --strip-dwarf` reduces a
+  ReleaseFast build from over 5MB to roughly 1.1MB (versus roughly 0.8MB
+  for ReleaseSmall). When invoking `wasm-opt`, pass the feature flags for
+  what the module uses, e.g. `--enable-simd --enable-bulk-memory
+--enable-sign-ext --enable-nontrapping-float-to-int --enable-multivalue
+--enable-reference-types`.

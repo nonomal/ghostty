@@ -1,7 +1,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const args = @import("args.zig");
-const Action = @import("action.zig").Action;
+const Action = @import("ghostty.zig").Action;
+const global = @import("../global.zig");
 
 // Note that this options struct doesn't implement the `help` decl like other
 // actions. That is because the help command is special and wants to handle its
@@ -16,7 +17,7 @@ pub const Options = struct {
 };
 
 /// The `help` command shows general help about Ghostty. Recognized as either
-/// `-h, `--help`, or like other actions `+help`.
+/// `-h`, `--help`, or like other actions `+help`.
 ///
 /// You can also specify `--help` or `-h` along with any action such as
 /// `+list-themes` to see help for a specific action.
@@ -25,12 +26,14 @@ pub fn run(alloc: Allocator) !u8 {
     defer opts.deinit();
 
     {
-        var iter = try args.argsIterator(alloc);
+        var iter = try args.argsIterator(alloc, global.args());
         defer iter.deinit();
         try args.parse(Options, alloc, &opts, &iter);
     }
 
-    const stdout = std.io.getStdOut().writer();
+    var buffer: [2048]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(global.io(), &buffer);
+    const stdout = &stdout_writer.interface;
     try stdout.writeAll(
         \\Usage: ghostty [+action] [options]
         \\
@@ -51,14 +54,16 @@ pub fn run(alloc: Allocator) !u8 {
         \\`ghostty -e top` will run the `top` command inside the terminal.
         \\
         \\On macOS, launching the terminal emulator from the CLI is not
-        \\supported and only actions are supported.
+        \\supported and only actions are supported. Use `open -na Ghostty.app`
+        \\instead, or `open -na ghostty.app --args --foo=bar --baz=quz` to pass
+        \\arguments.
         \\
         \\Available actions:
         \\
         \\
     );
 
-    inline for (@typeInfo(Action).Enum.fields) |field| {
+    inline for (@typeInfo(Action).@"enum".fields) |field| {
         try stdout.print("  +{s}\n", .{field.name});
     }
 
@@ -68,6 +73,7 @@ pub fn run(alloc: Allocator) !u8 {
         \\where `<action>` is one of actions listed above.
         \\
     );
+    try stdout.flush();
 
     return 0;
 }

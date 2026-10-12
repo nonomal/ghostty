@@ -3,23 +3,32 @@
   lib,
   stdenv,
   bashInteractive,
+  doxygen,
+  nushell,
+  appstream,
+  flatpak-builder,
   gdb,
+  cmake,
   #, glxinfo # unused
   ncurses,
   nodejs,
-  nodePackages,
+  prettier,
   oniguruma,
   parallel,
   pkg-config,
   python3,
   qemu,
   scdoc,
-  snapcraft,
+  # snapcraft,
   valgrind,
   #, vulkan-loader # unused
   vttest,
   wabt,
+  wasm-tools,
   wasmtime,
+  binaryen,
+  twiggy,
+  wizer,
   wraptest,
   zig,
   zip,
@@ -33,13 +42,16 @@
   gtk4,
   gtk4-layer-shell,
   gobject-introspection,
+  gst_all_1,
   libadwaita,
   blueprint-compiler,
+  gettext,
   adwaita-icon-theme,
   hicolor-icon-theme,
   harfbuzz,
+  libglvnd,
   libpng,
-  libGL,
+  libxkbcommon,
   libX11,
   libXcursor,
   libXext,
@@ -52,55 +64,47 @@
   zlib,
   alejandra,
   jq,
+  kaitai-struct-compiler,
   minisign,
   pandoc,
+  pinact,
   hyperfine,
+  poop,
   typos,
+  shellcheck,
+  swiftlint,
+  uv,
   wayland,
   wayland-scanner,
   wayland-protocols,
-  zig2nix,
-  system,
+  zon2nix,
+  pkgs,
+  # needed by GTK for loading SVG icons while running from within the
+  # developer shell
+  glycin-loaders,
+  librsvg,
 }: let
   # See package.nix. Keep in sync.
-  rpathLibs =
-    [
-      libGL
-    ]
-    ++ lib.optionals stdenv.hostPlatform.isLinux [
-      bzip2
-      expat
-      fontconfig
-      freetype
-      harfbuzz
-      libpng
-      libxml2
-      oniguruma
-      simdutf
-      zlib
-
-      glslang
-      spirv-cross
-
-      libX11
-      libXcursor
-      libXi
-      libXrandr
-
-      libadwaita
-      gtk4
-      gtk4-layer-shell
-      glib
-      gobject-introspection
-      wayland
-    ];
+  ld_library_path = import ./build-support/ld-library-path.nix {
+    inherit pkgs lib stdenv;
+  };
+  gi_typelib_path = import ./build-support/gi-typelib-path.nix {
+    inherit pkgs lib stdenv;
+  };
+  python = python3.withPackages (python-pkgs: [
+    python-pkgs.jsonschema
+    python-pkgs.kaitaistruct
+    python-pkgs.ucs-detect
+    python-pkgs.wasmtime
+  ]);
 in
   mkShell {
     name = "ghostty";
-
     packages =
       [
         # For builds
+        cmake
+        doxygen
         jq
         llvmPackages_latest.llvm
         minisign
@@ -110,25 +114,47 @@ in
         scdoc
         zig
         zip
-        zig2nix.packages.${system}.zon2nix
+        zon2nix.packages.${stdenv.hostPlatform.system}.zon2nix
 
         # For web and wasm stuff
         nodejs
 
         # Linting
-        nodePackages.prettier
+        prettier
         alejandra
+        pinact
         typos
+        shellcheck
 
         # Testing
         parallel
-        python3
+        python
         vttest
         hyperfine
+        kaitai-struct-compiler
 
         # wasm
+        binaryen
+        twiggy
         wabt
+        wasm-tools
         wasmtime
+        wizer
+
+        # Localization
+        gettext
+
+        # CI
+        uv
+
+        # Scripting
+        nushell
+
+        # We need these GTK-related deps on all platform so we can build
+        # dist tarballs.
+        blueprint-compiler
+        libadwaita
+        gtk4
       ]
       ++ lib.optionals stdenv.hostPlatform.isLinux [
         # My nix shell environment installs the non-interactive version
@@ -139,8 +165,10 @@ in
         # build only has the qemu-system files.
         qemu
 
+        appstream
+        flatpak-builder
         gdb
-        snapcraft
+        # snapcraft
         valgrind
         wraptest
 
@@ -158,6 +186,8 @@ in
         glslang
         spirv-cross
 
+        libglvnd
+        libxkbcommon
         libX11
         libXcursor
         libXext
@@ -166,20 +196,32 @@ in
         libXrandr
 
         # Only needed for GTK builds
-        blueprint-compiler
-        libadwaita
-        gtk4
         gtk4-layer-shell
         glib
         gobject-introspection
         wayland
         wayland-scanner
         wayland-protocols
+        gst_all_1.gstreamer
+        gst_all_1.gst-plugins-base
+        gst_all_1.gst-plugins-good
+
+        # needed by GTK for loading SVG icons while running from within the
+        # developer shell
+        glycin-loaders
+        librsvg
+
+        # for benchmarking
+        poop
+      ]
+      ++ lib.optionals stdenv.hostPlatform.isDarwin [
+        swiftlint
       ];
 
     # This should be set onto the rpath of the ghostty binary if you want
     # it to be "portable" across the system.
-    LD_LIBRARY_PATH = lib.makeLibraryPath rpathLibs;
+    LD_LIBRARY_PATH = ld_library_path;
+    GI_TYPELIB_PATH = gi_typelib_path;
 
     shellHook =
       (lib.optionalString stdenv.hostPlatform.isLinux ''
@@ -192,9 +234,26 @@ in
       '')
       + (lib.optionalString stdenv.hostPlatform.isDarwin ''
         # On macOS, we unset the macOS SDK env vars that Nix sets up because
-        # we rely on a system installation. Nix only provides a macOS SDK
-        # and we need iOS too.
+        # we rely on a system installation. Nix only provides a macOS SDK.
         unset SDKROOT
         unset DEVELOPER_DIR
+
+        # AFL++ needs to use the Homebrew/system Apple toolchain directly.
+        # The Nix compiler wrapper variables leak a Nix linker into afl-cc,
+        # which breaks even trivial fuzz harness links on macOS.
+        unset NIX_CC
+        unset NIX_CFLAGS_COMPILE
+        unset NIX_LDFLAGS
+        unset LD
+        unset CC
+        unset CXX
+        unset CFLAGS
+        unset CPPFLAGS
+        unset LDFLAGS
+
+        # We need to remove "xcrun" from the PATH. It is injected by
+        # some dependency but we need to rely on system Xcode tools
+        export PATH=$(echo "$PATH" | awk -v RS=: -v ORS=: '$0 !~ /xcrun/ || $0 == "/usr/bin" {print}' | sed 's/:$//')
+        export PATH="${python}/bin:/opt/homebrew/opt/llvm/bin:/opt/homebrew/bin:/usr/local/opt/llvm/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
       '');
   }

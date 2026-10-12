@@ -1,18 +1,10 @@
 const std = @import("std");
-const builtin = @import("builtin");
-const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
-const xev = @import("../global.zig").xev;
-const build_config = @import("../build_config.zig");
-const configpkg = @import("../config.zig");
-const internal_os = @import("../os/main.zig");
 const renderer = @import("../renderer.zig");
-const shell_integration = @import("shell_integration.zig");
 const terminal = @import("../terminal/main.zig");
 const termio = @import("../termio.zig");
-const Command = @import("../Command.zig");
-const Pty = @import("../pty.zig").Pty;
+const ProcessInfo = @import("../pty.zig").ProcessInfo;
 
 // The preallocation size for the write request pool. This should be big
 // enough to satisfy most write requests. It must be a power of 2.
@@ -109,6 +101,15 @@ pub const Backend = union(Kind) {
             ),
         }
     }
+
+    /// Get information about the process(es) attached to the backend. Returns
+    /// `null` if there was an error getting the information or the information
+    /// is not available on a particular platform.
+    pub fn getProcessInfo(self: *Backend, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
+        return switch (self.*) {
+            .exec => |*exec| exec.getProcessInfo(info),
+        };
+    }
 };
 
 /// Termio thread data. See termio.ThreadData for docs.
@@ -122,11 +123,7 @@ pub const ThreadData = union(Kind) {
     }
 
     pub fn changeConfig(self: *ThreadData, config: *termio.DerivedConfig) void {
-        switch (self.*) {
-            .exec => |*exec| {
-                exec.abnormal_runtime_threshold_ms = config.abnormal_runtime_threshold_ms;
-                exec.wait_after_command = config.wait_after_command;
-            },
-        }
+        _ = self;
+        _ = config;
     }
 };

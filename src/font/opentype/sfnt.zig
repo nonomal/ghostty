@@ -1,5 +1,5 @@
 const std = @import("std");
-const assert = std.debug.assert;
+const assert = @import("../../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 
 /// 8-bit unsigned integer.
@@ -64,7 +64,7 @@ pub const Version16Dot16 = packed struct(u32) {
 pub const F26Dot6 = FixedPoint(i32, 26, 6);
 
 fn FixedPoint(comptime T: type, int_bits: u64, frac_bits: u64) type {
-    const type_info: std.builtin.Type.Int = @typeInfo(T).Int;
+    const type_info: std.builtin.Type.Int = @typeInfo(T).int;
     comptime assert(int_bits + frac_bits == type_info.bits);
 
     return packed struct(T) {
@@ -76,24 +76,22 @@ fn FixedPoint(comptime T: type, int_bits: u64, frac_bits: u64) type {
         ));
         const half = @as(T, 1) << @intCast(frac_bits - 1);
 
-        frac: std.meta.Int(.unsigned, frac_bits),
-        int: std.meta.Int(type_info.signedness, int_bits),
+        const Frac = std.meta.Int(.unsigned, frac_bits);
+        const Int = std.meta.Int(type_info.signedness, int_bits);
+
+        frac: Frac,
+        int: Int,
 
         pub fn to(self: Self, comptime FloatType: type) FloatType {
-            const i: FloatType = @floatFromInt(self.int);
-            const f: FloatType = @floatFromInt(self.frac);
-
-            return i + f / frac_factor;
+            return @as(FloatType, @floatFromInt(
+                @as(T, @bitCast(self)),
+            )) / frac_factor;
         }
 
         pub fn from(float: anytype) Self {
-            const int = @floor(float);
-            const frac = @abs(float - int);
-
-            return .{
-                .int = @intFromFloat(int),
-                .frac = @intFromFloat(@round(frac * frac_factor)),
-            };
+            return @bitCast(
+                @as(T, @intFromFloat(@round(float * frac_factor))),
+            );
         }
 
         /// Round to the nearest integer, .5 rounds away from 0.
@@ -108,7 +106,7 @@ fn FixedPoint(comptime T: type, int_bits: u64, frac_bits: u64) type {
             self: Self,
             comptime fmt: []const u8,
             options: std.fmt.FormatOptions,
-            writer: anytype,
+            writer: *std.Io.Writer,
         ) !void {
             _ = fmt;
             _ = options;
@@ -178,7 +176,7 @@ pub const SFNT = struct {
                 self: OffsetSubtable,
                 comptime fmt: []const u8,
                 options: std.fmt.FormatOptions,
-                writer: anytype,
+                writer: *std.Io.Writer,
             ) !void {
                 _ = fmt;
                 _ = options;
@@ -212,7 +210,7 @@ pub const SFNT = struct {
                 self: TableRecord,
                 comptime fmt: []const u8,
                 options: std.fmt.FormatOptions,
-                writer: anytype,
+                writer: *std.Io.Writer,
             ) !void {
                 _ = fmt;
                 _ = options;
@@ -237,8 +235,7 @@ pub const SFNT = struct {
     /// Parse a font from raw data. The struct will keep a
     /// reference to `data` and use it for future operations.
     pub fn init(data: []const u8, alloc: Allocator) !SFNT {
-        var fbs = std.io.fixedBufferStream(data);
-        const reader = fbs.reader();
+        var reader: std.Io.Reader = .fixed(data);
 
         // SFNT files use big endian, if our native endian is
         // not big we'll need to byte swap the values we read.
@@ -246,7 +243,7 @@ pub const SFNT = struct {
 
         var directory: Directory = undefined;
 
-        try reader.readNoEof(std.mem.asBytes(&directory.offset));
+        try reader.readSliceAll(std.mem.asBytes(&directory.offset));
         if (byte_swap) std.mem.byteSwapAllFields(
             Directory.OffsetSubtable,
             &directory.offset,
@@ -254,7 +251,7 @@ pub const SFNT = struct {
 
         directory.records = try alloc.alloc(Directory.TableRecord, directory.offset.num_tables);
 
-        try reader.readNoEof(std.mem.sliceAsBytes(directory.records));
+        try reader.readSliceAll(std.mem.sliceAsBytes(directory.records));
         if (byte_swap) for (directory.records) |*record| {
             std.mem.byteSwapAllFields(
                 Directory.TableRecord,
@@ -287,6 +284,9 @@ pub const SFNT = struct {
 const native_endian = @import("builtin").target.cpu.arch.endian();
 
 test "parse font" {
+    // lib-vt source archives intentionally exclude full Ghostty font fixtures.
+    if (comptime @import("terminal_options").artifact == .lib) return error.SkipZigTest;
+
     const testing = std.testing;
     const alloc = testing.allocator;
 
@@ -300,6 +300,9 @@ test "parse font" {
 }
 
 test "get table" {
+    // lib-vt source archives intentionally exclude full Ghostty font fixtures.
+    if (comptime @import("terminal_options").artifact == .lib) return error.SkipZigTest;
+
     const testing = std.testing;
     const alloc = testing.allocator;
 

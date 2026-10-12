@@ -1,100 +1,127 @@
 .{
-    .name = "ghostty",
-    .version = "1.1.3",
+    .name = .ghostty,
+    .version = "1.3.2-dev",
     .paths = .{""},
+    .fingerprint = 0x64407a2a0b4147e5,
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        // Zig libs
+        // Our higher-level C translation helper (this also helps ensure we
+        // only need to maintain one external dependency point)
+        .translate_c = .{ .path = "./pkg/translate-c" },
 
+        // Zig libs
         .libxev = .{
             // mitchellh/libxev
-            .url = "https://github.com/mitchellh/libxev/archive/8943932a668f338cb2c500f6e1a7396bacd8b55d.tar.gz",
-            .hash = "1220a67b584c9499154de8c96851ed8e92315452cb2027c06e2d7d07a39c6f900d1a",
-        },
-        .mach_glfw = .{
-            // mitchellh/mach-glfw
-            .url = "https://deps.files.ghostty.org/mach_glfw-12206ed982e709e565d536ce930701a8c07edfd2cfdce428683f3f2a601d37696a62.tar.gz",
-            .hash = "12206ed982e709e565d536ce930701a8c07edfd2cfdce428683f3f2a601d37696a62",
+            .url = "https://deps.files.ghostty.org/libxev-9ce8e8e6ff89e583258a7f8e7adeeeaeae8611bf.tar.gz",
+            .hash = "libxev-0.0.0-86vtcwIRFADbH4hk-EjROXxlrKIRPQdA41XiTSytYO-F",
             .lazy = true,
         },
         .vaxis = .{
             // rockorager/libvaxis
-            .url = "git+https://github.com/rockorager/libvaxis#2237a7059eae99e9f132dd5acd1555e49d6c7d93",
-            .hash = "1220f5aec880d4f430cc1597ede88f1530da69e39a4986080e976b0c7b919c2ebfeb",
+            .url = "https://deps.files.ghostty.org/vaxis-1dbbe575dff4586fe51e3217aa5c3fecdcbb6089.tar.gz",
+            .hash = "vaxis-0.6.0-BWNV_CrbCQCscGpzsAlR402rYQ_tV3aAl081c2iRRkka",
+            .lazy = true,
         },
         .z2d = .{
             // vancluever/z2d
-            .url = "https://deps.files.ghostty.org/z2d-12201f0d542e7541cf492a001d4d0d0155c92f58212fbcb0d224e95edeba06b5416a.tar.gz",
-            .hash = "12201f0d542e7541cf492a001d4d0d0155c92f58212fbcb0d224e95edeba06b5416a",
+            .url = "https://deps.files.ghostty.org/z2d-7dbae85c81784dba9988320bf9543ed9a81350c8.tar.gz",
+            .hash = "z2d-0.12.1-j5P_Hsw8EQAKyZTQICCQnAH2xYkLDW8k9uefbsYdfPZ-",
+            .lazy = true,
         },
         .zig_objc = .{
             // mitchellh/zig-objc
-            .url = "https://deps.files.ghostty.org/zig_objc-1220e17e64ef0ef561b3e4b9f3a96a2494285f2ec31c097721bf8c8677ec4415c634.tar.gz",
-            .hash = "1220e17e64ef0ef561b3e4b9f3a96a2494285f2ec31c097721bf8c8677ec4415c634",
+            .url = "https://deps.files.ghostty.org/zig_objc-c8de82ff80281215ad92900866dab7103a8efa8b.tar.gz",
+            .hash = "zig_objc-0.0.0-Ir_Sp9gsAQCPAJc0oF5xoWePHWP6Y6tCphDeyNUThJoi",
+            .lazy = true,
         },
         .zig_js = .{
             // mitchellh/zig-js
-            .url = "https://deps.files.ghostty.org/zig_js-12205a66d423259567764fa0fc60c82be35365c21aeb76c5a7dc99698401f4f6fefc.tar.gz",
-            .hash = "12205a66d423259567764fa0fc60c82be35365c21aeb76c5a7dc99698401f4f6fefc",
+            .url = "https://deps.files.ghostty.org/zig_js-3c23860e47fdcdc5af805efb7fd0bdac5fd3e9bc.tar.gz",
+            .hash = "zig_js-0.0.0-rjCAV7-GAADvMTBL7lPMuvDk7xgS9PCMIZWiOUXLZSlj",
+            .lazy = true,
         },
-        .ziglyph = .{
-            .url = "https://deps.files.ghostty.org/ziglyph-b89d43d1e3fb01b6074bc1f7fc980324b04d26a5.tar.gz",
-            .hash = "12207831bce7d4abce57b5a98e8f3635811cfefd160bca022eb91fe905d36a02cf25",
+        .uucode = .{
+            // jacobsandlund/uucode
+            .url = "https://github.com/jacobsandlund/uucode/archive/9d55524551411b493cca41ca06363625d90aff1e.tar.gz",
+            .hash = "uucode-0.2.0-ZZjBPuuFVgC8YZ8eld4fOKsZANLIhTFMzULQxhkLi1C7",
         },
         .zig_wayland = .{
             // codeberg ifreund/zig-wayland
-            .url = "https://deps.files.ghostty.org/zig-wayland-fbfe3b4ac0b472a27b1f1a67405436c58cbee12d.tar.gz",
-            .hash = "12209ca054cb1919fa276e328967f10b253f7537c4136eb48f3332b0f7cf661cad38",
+            .url = "https://deps.files.ghostty.org/wayland-0.6.0-lQa1kqz8AQADQmdNJsNhLoNHcnEGEUjrOaPV-dtEnEmX.tar.gz",
+            .hash = "wayland-0.6.0-lQa1kqz8AQADQmdNJsNhLoNHcnEGEUjrOaPV-dtEnEmX",
+            .lazy = true,
         },
         .zf = .{
             // natecraddock/zf
-            .url = "https://deps.files.ghostty.org/zf-1220edc3b8d8bedbb50555947987e5e8e2f93871ca3c8e8d4cc8f1377c15b5dd35e8.tar.gz",
-            .hash = "1220edc3b8d8bedbb50555947987e5e8e2f93871ca3c8e8d4cc8f1377c15b5dd35e8",
+            .url = "https://deps.files.ghostty.org/zf-c35c421f84895193246db06c40683c1a30e616ef.tar.gz",
+            .hash = "zf-0.11.0-OIRy8X-RAAAwaRXHMYpj2uvBnuGTZWEE_3V7acqHQNtW",
+            .lazy = true,
         },
         .gobject = .{
-            // ianprime0509/zig-gobject
-            .url = "https://deps.files.ghostty.org/gobject-12208d70ee791d7ef7e16e1c3c9c1127b57f1ed066a24f87d57fc9f730c5dc394b9d.tar.zst",
-            .hash = "12208d70ee791d7ef7e16e1c3c9c1127b57f1ed066a24f87d57fc9f730c5dc394b9d",
+            // https://github.com/ghostty-org/zig-gobject based on zig_gobject
+            // Temporary until we generate them at build time automatically.
+            .url = "https://deps.files.ghostty.org/gobject-2026-07-28-36-1.tar.zst",
+            .hash = "gobject-0.3.2-Skun7F6HogCMynX2JqeSHS7xr-8pK4ob-qRFIcEasVi3",
+            .lazy = true,
         },
 
         // C libs
-        .cimgui = .{ .path = "./pkg/cimgui" },
-        .fontconfig = .{ .path = "./pkg/fontconfig" },
-        .freetype = .{ .path = "./pkg/freetype" },
-        .harfbuzz = .{ .path = "./pkg/harfbuzz" },
-        .highway = .{ .path = "./pkg/highway" },
-        .libpng = .{ .path = "./pkg/libpng" },
-        .macos = .{ .path = "./pkg/macos" },
-        .oniguruma = .{ .path = "./pkg/oniguruma" },
-        .opengl = .{ .path = "./pkg/opengl" },
-        .sentry = .{ .path = "./pkg/sentry" },
-        .simdutf = .{ .path = "./pkg/simdutf" },
-        .utfcpp = .{ .path = "./pkg/utfcpp" },
-        .wuffs = .{ .path = "./pkg/wuffs" },
-        .zlib = .{ .path = "./pkg/zlib" },
+        .dcimgui = .{ .path = "./pkg/dcimgui", .lazy = true },
+        .fontconfig = .{ .path = "./pkg/fontconfig", .lazy = true },
+        .freetype = .{ .path = "./pkg/freetype", .lazy = true },
+        .gtk4_layer_shell = .{ .path = "./pkg/gtk4-layer-shell", .lazy = true },
+        .harfbuzz = .{ .path = "./pkg/harfbuzz", .lazy = true },
+        .highway = .{ .path = "./pkg/highway", .lazy = true },
+        .libintl = .{ .path = "./pkg/libintl", .lazy = true },
+        .libpng = .{ .path = "./pkg/libpng", .lazy = true },
+        .macos = .{ .path = "./pkg/macos", .lazy = true },
+        .oniguruma = .{ .path = "./pkg/oniguruma", .lazy = true },
+        .opengl = .{ .path = "./pkg/opengl", .lazy = true },
+        .sentry = .{ .path = "./pkg/sentry", .lazy = true },
+        .simdutf = .{ .path = "./pkg/simdutf", .lazy = true },
+        .wuffs = .{ .path = "./pkg/wuffs", .lazy = true },
+        .zlib = .{ .path = "./pkg/zlib", .lazy = true },
 
         // Shader translation
-        .glslang = .{ .path = "./pkg/glslang" },
-        .spirv_cross = .{ .path = "./pkg/spirv-cross" },
+        .glslang = .{ .path = "./pkg/glslang", .lazy = true },
+        .spirv_cross = .{ .path = "./pkg/spirv-cross", .lazy = true },
 
         // Wayland
         .wayland = .{
             .url = "https://deps.files.ghostty.org/wayland-9cb3d7aa9dc995ffafdbdef7ab86a949d0fb0e7d.tar.gz",
-            .hash = "12202cdac858abc52413a6c6711d5026d2d3c8e13f95ca2c327eade0736298bb021f",
+            .hash = "N-V-__8AAKrHGAAs2shYq8UkE6bGcR1QJtLTyOE_lcosMn6t",
+            .lazy = true,
         },
         .wayland_protocols = .{
-            .url = "https://deps.files.ghostty.org/wayland-protocols-258d8f88f2c8c25a830c6316f87d23ce1a0f12d9.tar.gz",
-            .hash = "12201a57c6ce0001aa034fa80fba3e1cd2253c560a45748f4f4dd21ff23b491cddef",
+            .url = "https://deps.files.ghostty.org/N-V-__8AAFdWDwA0ktbNUi9pFBHCRN4weXIgIfCrVjfGxqgA.tar.gz",
+            .hash = "N-V-__8AAFdWDwA0ktbNUi9pFBHCRN4weXIgIfCrVjfGxqgA",
+            .lazy = true,
         },
         .plasma_wayland_protocols = .{
             .url = "https://deps.files.ghostty.org/plasma_wayland_protocols-12207e0851c12acdeee0991e893e0132fc87bb763969a585dc16ecca33e88334c566.tar.gz",
-            .hash = "12207e0851c12acdeee0991e893e0132fc87bb763969a585dc16ecca33e88334c566",
+            .hash = "N-V-__8AAKYZBAB-CFHBKs3u4JkeiT4BMvyHu3Y5aaWF3Bbs",
+            .lazy = true,
+        },
+
+        // Fonts
+        .jetbrains_mono = .{
+            .url = "https://deps.files.ghostty.org/JetBrainsMono-2.304.tar.gz",
+            .hash = "N-V-__8AAIC5lwAVPJJzxnCAahSvZTIlG-HhtOvnM1uh-66x",
+            .lazy = true,
+        },
+        .nerd_fonts_symbols_only = .{
+            .url = "https://deps.files.ghostty.org/NerdFontsSymbolsOnly-3.4.0.tar.gz",
+            .hash = "N-V-__8AAMVLTABmYkLqhZPLXnMl-KyN38R8UVYqGrxqO26s",
+            .lazy = true,
         },
 
         // Other
         .apple_sdk = .{ .path = "./pkg/apple-sdk" },
+        .android_ndk = .{ .path = "./pkg/android-ndk" },
         .iterm2_themes = .{
-            .url = "https://github.com/mbadolato/iTerm2-Color-Schemes/archive/e21d5ffd19605741d0e3e19d7c5a8c6c25648673.tar.gz",
-            .hash = "122071ad56fd984afb4f94d441b6ea3e21f1741a0e026b02860d9a46110fac2cd109",
+            .url = "https://deps.files.ghostty.org/ghostty-themes-release-20261005-151109-31756e7.tgz",
+            .hash = "N-V-__8AADNBBQDD4MFOa3Y7R_A8PHIeWQ1IZdOiBFZS3nZ7",
+            .lazy = true,
         },
     },
 }

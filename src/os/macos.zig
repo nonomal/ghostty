@@ -1,13 +1,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const build_config = @import("../build_config.zig");
-const assert = std.debug.assert;
+const assert = @import("../quirks.zig").inlineAssert;
 const objc = @import("objc");
 const Allocator = std.mem.Allocator;
 
 /// Verifies that the running macOS system version is at least the given version.
 pub fn isAtLeastVersion(major: i64, minor: i64, patch: i64) bool {
-    comptime assert(builtin.target.isDarwin());
+    comptime assert(builtin.target.os.tag.isDarwin());
 
     const NSProcessInfo = objc.getClass("NSProcessInfo").?;
     const info = NSProcessInfo.msgSend(objc.Object, objc.sel("processInfo"), .{});
@@ -28,7 +28,7 @@ pub fn appSupportDir(
     return try commonDir(
         alloc,
         .NSApplicationSupportDirectory,
-        &.{ build_config.bundle_id, sub_path },
+        sub_path,
     );
 }
 
@@ -43,7 +43,7 @@ pub fn cacheDir(
     return try commonDir(
         alloc,
         .NSCachesDirectory,
-        &.{ build_config.bundle_id, sub_path },
+        sub_path,
     );
 }
 
@@ -88,6 +88,10 @@ extern "c" fn pthread_set_qos_class_self_np(
     relative_priority: c_int,
 ) c_int;
 
+pub extern "c" fn pthread_setname_np(
+    name: [*:0]const u8,
+) void;
+
 pub const NSOperatingSystemVersion = extern struct {
     major: i64,
     minor: i64,
@@ -106,9 +110,9 @@ pub const NSSearchPathDomainMask = enum(c_ulong) {
 fn commonDir(
     alloc: Allocator,
     directory: NSSearchPathDirectory,
-    sub_paths: []const []const u8,
+    sub_path: []const u8,
 ) (error{AppleAPIFailed} || Allocator.Error)![]const u8 {
-    comptime assert(builtin.target.isDarwin());
+    comptime assert(builtin.target.os.tag.isDarwin());
 
     const NSFileManager = objc.getClass("NSFileManager").?;
     const manager = NSFileManager.msgSend(
@@ -136,17 +140,14 @@ fn commonDir(
         return error.AppleAPIFailed;
     const base_dir = std.mem.sliceTo(c_str, 0);
 
-    // Create a new array with base_dir as the first element
-    var paths = try alloc.alloc([]const u8, sub_paths.len + 1);
-    paths[0] = base_dir;
-    @memcpy(paths[1..], sub_paths);
-    defer alloc.free(paths);
-
-    return try std.fs.path.join(alloc, paths);
+    return try std.fs.path.join(
+        alloc,
+        &.{ base_dir, build_config.bundle_id, sub_path },
+    );
 }
 
 test "cacheDir paths" {
-    if (!builtin.target.isDarwin()) return;
+    if (!builtin.target.os.tag.isDarwin()) return;
 
     const testing = std.testing;
     const alloc = testing.allocator;

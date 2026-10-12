@@ -3,12 +3,6 @@ import Cocoa
 import SwiftUI
 import GhosttyKit
 
-// This is a Apple's private function that we need to call to get the active space.
-@_silgen_name("CGSGetActiveSpace")
-func CGSGetActiveSpace(_ cid: Int) -> size_t
-@_silgen_name("CGSMainConnectionID")
-func CGSMainConnectionID() -> Int
-
 /// Controller for the "quick" terminal.
 class QuickTerminalController: BaseTerminalController {
     override var windowNibName: NSNib.Name? { "QuickTerminal" }
@@ -22,25 +16,47 @@ class QuickTerminalController: BaseTerminalController {
     /// The previously running application when the terminal is shown. This is NEVER Ghostty.
     /// If this is set then when the quick terminal is animated out then we will restore this
     /// application to the front.
-    private var previousApp: NSRunningApplication? = nil
+    private var previousApp: NSRunningApplication?
 
     // The active space when the quick terminal was last shown.
-    private var previousActiveSpace: size_t = 0
+    private var previousActiveSpace: CGSSpace?
+
+    /// Cache for per-screen window state.
+    let screenStateCache: QuickTerminalScreenStateCache
 
     /// Non-nil if we have hidden dock state.
-    private var hiddenDock: HiddenDock? = nil
+    private var hiddenDock: HiddenDock?
 
     /// The configuration derived from the Ghostty config so we don't need to rely on references.
     private var derivedConfig: DerivedConfig
 
+    /// Tracks if we're currently handling a manual resize to prevent recursion
+    private var isHandlingResize: Bool = false
+
+    /// This is set to false by init if the window managed by this controller should not be restorable.
+    /// For example, terminals executing custom scripts are not restorable.
+    let restorable: Bool
+    private var restorationState: QuickTerminalRestorableState?
+
     init(_ ghostty: Ghostty.App,
          position: QuickTerminalPosition = .top,
          baseConfig base: Ghostty.SurfaceConfiguration? = nil,
-         surfaceTree tree: Ghostty.SplitNode? = nil
+         restorationState: QuickTerminalRestorableState? = nil,
     ) {
         self.position = position
         self.derivedConfig = DerivedConfig(ghostty.config)
-        super.init(ghostty, baseConfig: base, surfaceTree: tree)
+        // The window we manage is not restorable if we've specified a command
+        // to execute. We do this because the restored window is meaningless at the
+        // time of writing this: it'd just restore to a shell in the same directory
+        // as the script. We may want to revisit this behavior when we have scrollback
+        // restoration.
+        restorable = (base?.command ?? "") == ""
+        self.restorationState = restorationState
+        self.screenStateCache = QuickTerminalScreenStateCache(stateByDisplay: restorationState?.screenStateEntries ?? [:])
+        // Important detail here: we initialize with an empty surface tree so
+        // that we don't start a terminal process. This gets started when the
+        // first terminal is shown in `animateIn`.
+        super.init(ghostty, baseConfig: base, surfaceTree: .init())
 
         // Setup our notifications for behaviors
         let center = NotificationCenter.default
@@ -51,7 +67,7 @@ class QuickTerminalController: BaseTerminalController {
             object: nil)
         center.addObserver(
             self,
-            selector: #selector(onToggleFullscreen),
+            selector: #selector(onToggleFullscreen(notification:)),
             name: Ghostty.Notification.ghosttyToggleFullscreen,
             object: nil)
         center.addObserver(
@@ -61,8 +77,19 @@ class QuickTerminalController: BaseTerminalController {
             object: nil)
         center.addObserver(
             self,
+            selector: #selector(closeWindow(_:)),
+            name: .ghosttyCloseWindow,
+            object: nil
+        )
+        center.addObserver(
+            self,
             selector: #selector(onNewTab),
             name: Ghostty.Notification.ghosttyNewTab,
+            object: nil)
+        center.addObserver(
+            self,
+            selector: #selector(windowDidResize(_:)),
+            name: NSWindow.didResizeNotification,
             object: nil)
     }
 
@@ -89,22 +116,35 @@ class QuickTerminalController: BaseTerminalController {
         // window close so we can animate out.
         window.delegate = self
 
-        // The quick window is not restorable (yet!). "Yet" because in theory we can
-        // make this restorable, but it isn't currently implemented.
+        // The quick window is restored by `screenStateCache`.
+        // We disable this for better control
         window.isRestorable = false
 
         // Setup our configured appearance that we support.
         syncAppearance()
 
         // Setup our initial size based on our configured position
-        position.setLoaded(window)
+        position.setLoaded(window, size: derivedConfig.quickTerminalSize)
+
+        // Upon first adding this Window to its host view, older SwiftUI
+        // seems to have a "hiccup" and corrupts the frameRect,
+        // sometimes setting the size to zero, sometimes corrupting it.
+        // We pass the actual window's frame as "initial" frame directly
+        // to the window, so it can use that instead of the frameworks
+        // "interpretation"
+        if let qtWindow = window as? QuickTerminalWindow {
+            qtWindow.initialFrame = window.frame
+        }
 
         // Setup our content
-        window.contentView = NSHostingView(rootView: TerminalView(
-            ghostty: self.ghostty,
-            viewModel: self,
-            delegate: self
-        ))
+        window.contentView = TerminalViewContainer {
+            TerminalView(ghostty: ghostty, viewModel: self, delegate: self)
+        }
+
+        // Clear out our frame at this point, the fixup from above is complete.
+        if let qtWindow = window as? QuickTerminalWindow {
+            qtWindow.initialFrame = nil
+        }
 
         // Animate the window in
         animateIn()
@@ -154,14 +194,24 @@ class QuickTerminalController: BaseTerminalController {
                 animateOut()
 
             case .move:
-                let currentActiveSpace = CGSGetActiveSpace(CGSMainConnectionID())
+                let currentActiveSpace = CGSSpace.active()
                 if previousActiveSpace == currentActiveSpace {
                     // We haven't moved spaces. We lost focus to another app on the
                     // current space. Animate out.
                     animateOut()
                 } else {
-                    // We've moved to a different space. Bring the quick terminal back
-                    // into view.
+                    // We've moved to a different space.
+
+                    // If we're fullscreen, we need to exit fullscreen because the visible
+                    // bounds may have changed causing a new behavior.
+                    if let fullscreenStyle, fullscreenStyle.isFullscreen {
+                        fullscreenStyle.exit()
+                        DispatchQueue.main.async {
+                            self.onToggleFullscreen()
+                        }
+                    }
+
+                    // Make the window visible again on this space
                     DispatchQueue.main.async {
                         self.window?.makeKeyAndOrderFront(nil)
                     }
@@ -172,28 +222,109 @@ class QuickTerminalController: BaseTerminalController {
         }
     }
 
-    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
-        // We use the actual screen the window is on for this, since it should
-        // be on the proper screen.
-        guard let screen = window?.screen ?? NSScreen.main else { return frameSize }
-        return position.restrictFrameSize(frameSize, on: screen)
+    override func windowDidResize(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              window == self.window,
+              visible,
+              !isHandlingResize else { return }
+        guard let screen = window.screen ?? NSScreen.main else { return }
+
+        // Prevent recursive loops
+        isHandlingResize = true
+        defer { isHandlingResize = false }
+
+        switch position {
+        case .top, .bottom, .center:
+            // For centered positions (top, bottom, center), we need to recenter the window
+            // when it's manually resized to maintain proper positioning
+            let newOrigin = position.centeredOrigin(for: window, on: screen)
+            window.setFrameOrigin(newOrigin)
+        case .left, .right:
+            // For side positions, we may need to adjust vertical centering
+            let newOrigin = position.verticallyCenteredOrigin(for: window, on: screen)
+            window.setFrameOrigin(newOrigin)
+        }
     }
 
     // MARK: Base Controller Overrides
 
-    override func surfaceTreeDidChange(from: Ghostty.SplitNode?, to: Ghostty.SplitNode?) {
+    override func focusSurface(_ view: Ghostty.SurfaceView) {
+        if visible {
+            // If we're visible, we just focus the surface as normal.
+            super.focusSurface(view)
+            return
+        }
+        // Check if target surface belongs to this quick terminal
+        guard surfaceTree.contains(view) else { return }
+        // Set the target surface as focused
+        DispatchQueue.main.async {
+            Ghostty.moveFocus(to: view)
+        }
+        // Animation completion handler will handle window/app activation
+        animateIn()
+    }
+
+    override func surfaceTreeDidChange(from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>) {
         super.surfaceTreeDidChange(from: from, to: to)
 
-        // If our surface tree is nil then we animate the window out.
-        if (to == nil) {
+        // If our surface tree is nil then we animate the window out. We
+        // defer reinitializing the tree to save some memory here.
+        if to.isEmpty {
             animateOut()
+            return
         }
+
+        // If we're not empty (e.g. this isn't the first set) and we're
+        // not visible, then we animate in. This allows us to show the quick
+        // terminal when things such as undo/redo are done.
+        if !from.isEmpty && !visible {
+            animateIn()
+            return
+        }
+    }
+
+    override func closeSurface(
+        _ node: SplitTree<Ghostty.SurfaceView>.Node,
+        withConfirmation: Bool = true
+    ) {
+        // If this isn't the root then we're dealing with a split closure.
+        if surfaceTree.root != node {
+            super.closeSurface(node, withConfirmation: withConfirmation)
+            return
+        }
+
+        // If this isn't a final leaf then we're dealing with a split closure
+        guard case .leaf(let surface) = node else {
+            super.closeSurface(node, withConfirmation: withConfirmation)
+            return
+        }
+
+        // If its the root, we check if the process exited. If it did,
+        // then we do empty the tree.
+        if surface.processExited {
+            surfaceTree = .init()
+            return
+        }
+
+        // If its the root then we just animate out. We never actually allow
+        // the surface to fully close.
+        animateOut()
+    }
+
+    override func newSplit(
+        at oldView: Ghostty.SurfaceView,
+        direction: SplitTree<Ghostty.SurfaceView>.NewDirection,
+        baseConfig config: Ghostty.SurfaceConfiguration? = nil
+    ) -> Ghostty.SurfaceView? {
+        var config = config ?? Ghostty.SurfaceConfiguration()
+        config.environmentVariables["GHOSTTY_QUICK_TERMINAL"] = "1"
+        return super.newSplit(at: oldView, direction: direction, baseConfig: config)
     }
 
     // MARK: Methods
 
     func toggle() {
-        if (visible) {
+        if visible {
             animateOut()
         } else {
             animateIn()
@@ -217,26 +348,46 @@ class QuickTerminalController: BaseTerminalController {
         // we want to store it so we can restore state later.
         if !NSApp.isActive {
             if let previousApp = NSWorkspace.shared.frontmostApplication,
-               previousApp.bundleIdentifier != Bundle.main.bundleIdentifier
-            {
+               previousApp.bundleIdentifier != Bundle.main.bundleIdentifier {
                 self.previousApp = previousApp
             }
         }
 
         // Set previous active space
-        self.previousActiveSpace = CGSGetActiveSpace(CGSMainConnectionID())
+        self.previousActiveSpace = CGSSpace.active()
+
+        // If our surface tree is empty then we initialize a new terminal. The surface
+        // tree can be empty if for example we run "exit" in the terminal and force
+        // animate out.
+        if surfaceTree.isEmpty,
+           let ghostty_app = ghostty.app {
+            if let tree = restorationState?.surfaceTree, !tree.isEmpty {
+                surfaceTree = tree
+                let view = tree.first(where: { $0.id.uuidString == restorationState?.focusedSurface }) ?? tree.first!
+                focusedSurface = view
+                // Add a short delay to check if the correct surface is focused.
+                // Each SurfaceWrapper defaults its FocusedValue to itself; without this delay,
+                // the tree often focuses the first surface instead of the intended one.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    if !view.focused {
+                        self.focusedSurface = view
+                        self.makeWindowKey(window)
+                    }
+                }
+            } else {
+                var config = Ghostty.SurfaceConfiguration()
+                config.environmentVariables["GHOSTTY_QUICK_TERMINAL"] = "1"
+
+                let view = Ghostty.SurfaceView(ghostty_app, baseConfig: config)
+                surfaceTree = SplitTree(view: view)
+                focusedSurface = view
+            }
+        }
 
         // Animate the window in
         animateWindowIn(window: window, from: position)
-
-        // If our surface tree is nil then we initialize a new terminal. The surface
-        // tree can be nil if for example we run "eixt" in the terminal and force
-        // animate out.
-        if (surfaceTree == nil) {
-            let leaf: Ghostty.SplitNode.Leaf = .init(ghostty.app!, baseConfig: nil)
-            surfaceTree = .leaf(leaf)
-            focusedSurface = leaf.surface
-        }
+        // Clear the restoration state after first use
+        restorationState = nil
     }
 
     func animateOut() {
@@ -255,11 +406,34 @@ class QuickTerminalController: BaseTerminalController {
         animateWindowOut(window: window, to: position)
     }
 
+    func saveScreenState(exitFullscreen: Bool) {
+        // If we are in fullscreen, then we exit fullscreen. We do this immediately so
+        // we have th correct window.frame for the save state below.
+        if exitFullscreen, let fullscreenStyle, fullscreenStyle.isFullscreen {
+            fullscreenStyle.exit()
+        }
+        guard let window else { return }
+        // Save the current window frame before animating out. This preserves
+        // the user's preferred window size and position for when the quick
+        // terminal is reactivated with a new surface. Without this, SwiftUI
+        // would reset the window to its minimum content size.
+        if window.frame.width > 0 && window.frame.height > 0, let screen = window.screen {
+            screenStateCache.save(frame: window.frame, for: screen)
+        }
+    }
+
     private func animateWindowIn(window: NSWindow, from position: QuickTerminalPosition) {
         guard let screen = derivedConfig.quickTerminalScreen.screen else { return }
 
-        // Move our window off screen to the top
-        position.setInitial(in: window, on: screen)
+        // Grab our last closed frame to use from the cache.
+        let closedFrame = screenStateCache.frame(for: screen)
+
+        // Move our window off screen to the initial animation position.
+        position.setInitial(
+            in: window,
+            on: screen,
+            terminalSize: derivedConfig.quickTerminalSize,
+            closedFrame: closedFrame)
 
         // We need to set our window level to a high value. In testing, only
         // popUpMenu and above do what we want. This gets it above the menu bar
@@ -274,7 +448,7 @@ class QuickTerminalController: BaseTerminalController {
         // If our dock position would conflict with our target location then
         // we autohide the dock.
         if position.conflictsWithDock(on: screen) {
-            if (hiddenDock == nil) {
+            if hiddenDock == nil {
                 hiddenDock = .init()
             }
 
@@ -290,7 +464,11 @@ class QuickTerminalController: BaseTerminalController {
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = derivedConfig.quickTerminalAnimationDuration
             context.timingFunction = .init(name: .easeIn)
-            position.setFinal(in: window.animator(), on: screen)
+            position.setFinal(
+                in: window.animator(),
+                on: screen,
+                terminalSize: derivedConfig.quickTerminalSize,
+                closedFrame: closedFrame)
         }, completionHandler: {
             // There is a very minor delay here so waiting at least an event loop tick
             // keeps us safe from the view not being on the window.
@@ -368,6 +546,8 @@ class QuickTerminalController: BaseTerminalController {
     }
 
     private func animateWindowOut(window: NSWindow, to position: QuickTerminalPosition) {
+        saveScreenState(exitFullscreen: true)
+
         // If we hid the dock then we unhide it.
         hiddenDock = nil
 
@@ -376,16 +556,15 @@ class QuickTerminalController: BaseTerminalController {
         if !window.isOnActiveSpace {
             self.previousApp = nil
             window.orderOut(self)
+            // If our application is hidden previously, we hide it again
+            if (NSApp.delegate as? AppDelegate)?.hiddenState != nil {
+                NSApp.hide(nil)
+            }
             return
         }
 
         // We always animate out to whatever screen the window is actually on.
         guard let screen = window.screen ?? NSScreen.main else { return }
-
-        // If we are in fullscreen, then we exit fullscreen.
-        if let fullscreenStyle, fullscreenStyle.isFullscreen {
-            fullscreenStyle.exit()
-        }
 
         // If we have a previously active application, restore focus to it. We
         // do this BEFORE the animation below because when the animation completes
@@ -408,17 +587,26 @@ class QuickTerminalController: BaseTerminalController {
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = derivedConfig.quickTerminalAnimationDuration
             context.timingFunction = .init(name: .easeIn)
-            position.setInitial(in: window.animator(), on: screen)
+            position.setInitial(
+                in: window.animator(),
+                on: screen,
+                terminalSize: derivedConfig.quickTerminalSize,
+                closedFrame: window.frame)
         }, completionHandler: {
             // This causes the window to be removed from the screen list and macOS
             // handles what should be focused next.
             window.orderOut(self)
+            // If our application is hidden previously, we hide it again
+            if (NSApp.delegate as? AppDelegate)?.hiddenState != nil {
+                NSApp.hide(nil)
+            }
         })
     }
 
-    private func syncAppearance() {
+    override func syncAppearance() {
         guard let window else { return }
 
+        defer { updateColorSchemeForSurfaceTree() }
         // Change the collection behavior of the window depending on the configuration.
         window.collectionBehavior = derivedConfig.quickTerminalSpaceBehavior.collectionBehavior
 
@@ -427,7 +615,8 @@ class QuickTerminalController: BaseTerminalController {
         guard window.isVisible else { return }
 
         // If we have window transparency then set it transparent. Otherwise set it opaque.
-        if (self.derivedConfig.backgroundOpacity < 1) {
+        // Also check if the user has overridden transparency to be fully opaque.
+        if !isBackgroundOpaque && (self.derivedConfig.backgroundOpacity < 1 || derivedConfig.backgroundBlur.isGlassStyle) {
             window.isOpaque = false
 
             // This is weird, but we don't use ".clear" because this creates a look that
@@ -435,11 +624,25 @@ class QuickTerminalController: BaseTerminalController {
             // Terminal.app more easily.
             window.backgroundColor = .white.withAlphaComponent(0.001)
 
-            ghostty_set_window_background_blur(ghostty.app, Unmanaged.passUnretained(window).toOpaque())
+            if !derivedConfig.backgroundBlur.isGlassStyle {
+                ghostty_set_window_background_blur(ghostty.app, Unmanaged.passUnretained(window).toOpaque())
+            }
         } else {
             window.isOpaque = true
             window.backgroundColor = .windowBackgroundColor
         }
+
+        terminalViewContainer?.ghosttyConfigDidChange(ghostty.config, preferredBackgroundColor: nil)
+    }
+
+    override func confirmCloseAsync(messageText: String, informativeText: String, confirmButtonTitle: String = "Close") async -> NSApplication.ModalResponse? {
+
+        let waitTime = visible ? 0 : 0.25
+        animateIn()
+
+        try? await Task.sleep(for: .seconds(waitTime))
+
+        return await super.confirmCloseAsync(messageText: messageText, informativeText: informativeText, confirmButtonTitle: confirmButtonTitle)
     }
 
     private func showNoNewTabAlert() {
@@ -451,7 +654,6 @@ class QuickTerminalController: BaseTerminalController {
         alert.alertStyle = .warning
         alert.beginSheetModal(for: window)
     }
-
     // MARK: First Responder
 
     @IBAction override func closeWindow(_ sender: Any) {
@@ -485,9 +687,29 @@ class QuickTerminalController: BaseTerminalController {
     @objc private func onToggleFullscreen(notification: SwiftUI.Notification) {
         guard let target = notification.object as? Ghostty.SurfaceView else { return }
         guard target == self.focusedSurface else { return }
+        onToggleFullscreen()
+    }
 
-        // We ignore the requested mode and always use non-native for the quick terminal
-        toggleFullscreen(mode: .nonNative)
+    private func onToggleFullscreen() {
+        // We ignore the configured fullscreen style and always use non-native
+        // because the way the quick terminal works doesn't support native.
+        let mode: FullscreenMode
+        if NSApp.isFrontmost {
+            // If we're frontmost and we have a notch then we keep padding
+            // so all lines of the terminal are visible.
+            if window?.screen?.hasNotch ?? false {
+                mode = .nonNativePaddedNotch
+            } else {
+                mode = .nonNative
+            }
+        } else {
+            // An additional detail is that if the is NOT frontmost, then our
+            // NSApp.presentationOptions will not take effect so we must always
+            // do the visible menu mode since we can't get rid of the menu.
+            mode = .nonNativeVisibleMenu
+        }
+
+        toggleFullscreen(mode: mode)
     }
 
     @objc private func ghosttyConfigDidChange(_ notification: Notification) {
@@ -504,6 +726,8 @@ class QuickTerminalController: BaseTerminalController {
         self.derivedConfig = DerivedConfig(config)
 
         syncAppearance()
+
+        terminalViewContainer?.ghosttyConfigDidChange(config, preferredBackgroundColor: nil)
     }
 
     @objc private func onNewTab(notification: SwiftUI.Notification) {
@@ -519,14 +743,18 @@ class QuickTerminalController: BaseTerminalController {
         let quickTerminalAnimationDuration: Double
         let quickTerminalAutoHide: Bool
         let quickTerminalSpaceBehavior: QuickTerminalSpaceBehavior
+        let quickTerminalSize: QuickTerminalSize
         let backgroundOpacity: Double
+        let backgroundBlur: Ghostty.Config.BackgroundBlur
 
         init() {
             self.quickTerminalScreen = .main
             self.quickTerminalAnimationDuration = 0.2
             self.quickTerminalAutoHide = true
             self.quickTerminalSpaceBehavior = .move
+            self.quickTerminalSize = QuickTerminalSize()
             self.backgroundOpacity = 1.0
+            self.backgroundBlur = .disabled
         }
 
         init(_ config: Ghostty.Config) {
@@ -534,7 +762,9 @@ class QuickTerminalController: BaseTerminalController {
             self.quickTerminalAnimationDuration = config.quickTerminalAnimationDuration
             self.quickTerminalAutoHide = config.quickTerminalAutoHide
             self.quickTerminalSpaceBehavior = config.quickTerminalSpaceBehavior
+            self.quickTerminalSize = config.quickTerminalSize
             self.backgroundOpacity = config.backgroundOpacity
+            self.backgroundBlur = config.backgroundBlur
         }
     }
 

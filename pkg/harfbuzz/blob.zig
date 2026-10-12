@@ -1,5 +1,5 @@
 const std = @import("std");
-const c = @import("c.zig").c;
+const c = @import("hb_c");
 const Error = @import("errors.zig").Error;
 
 /// Data type holding the memory modes available to client programs.
@@ -77,11 +77,11 @@ pub const Blob = struct {
         comptime T: type,
         key: ?*anyopaque,
         ptr: ?*T,
-        comptime destroycb: ?*const fn (?*T) callconv(.C) void,
+        comptime destroycb: ?*const fn (?*T) callconv(.c) void,
         replace: bool,
     ) bool {
         const Callback = struct {
-            pub fn callback(data: ?*anyopaque) callconv(.C) void {
+            pub fn callback(data: ?*anyopaque) callconv(.c) void {
                 @call(.{ .modifier = .always_inline }, destroycb, .{
                     @as(?*T, @ptrCast(@alignCast(data))),
                 });

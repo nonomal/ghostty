@@ -14,11 +14,12 @@ pub const Thread = @This();
 const std = @import("std");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const builtin = @import("builtin");
-const xev = @import("../global.zig").xev;
+const global = @import("../global.zig");
+const xev = global.xev;
 const crash = @import("../crash/main.zig");
+const internal_os = @import("../os/main.zig");
 const termio = @import("../termio.zig");
 const renderer = @import("../renderer.zig");
-const BlockingQueue = @import("../datastruct/main.zig").BlockingQueue;
 
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.io_thread);
@@ -36,6 +37,9 @@ const Coalesce = struct {
 /// if the running program hasn't already.
 const sync_reset_ms = 1000;
 
+/// The number of milliseconds between each movement during selection scrolling.
+const selection_scroll_ms = 15;
+
 /// Allocator used for some state
 alloc: std.mem.Allocator,
 
@@ -51,6 +55,11 @@ wakeup_c: xev.Completion = .{},
 /// This can be used to stop the thread on the next loop iteration.
 stop: xev.Async,
 stop_c: xev.Completion = .{},
+
+/// This is used for timer-based selection scrolling.
+scroll: xev.Timer,
+scroll_c: xev.Completion = .{},
+scroll_active: bool = false,
 
 /// This is used to coalesce resize events.
 coalesce: xev.Timer,
@@ -91,6 +100,10 @@ pub fn init(
     var stop_h = try xev.Async.init();
     errdefer stop_h.deinit();
 
+    // This timer is used for selection scrolling.
+    var scroll_h = try xev.Timer.init();
+    errdefer scroll_h.deinit();
+
     // This timer is used to coalesce resize events.
     var coalesce_h = try xev.Timer.init();
     errdefer coalesce_h.deinit();
@@ -103,6 +116,7 @@ pub fn init(
         .alloc = alloc,
         .loop = loop,
         .stop = stop_h,
+        .scroll = scroll_h,
         .coalesce = coalesce_h,
         .sync_reset = sync_reset_h,
     };
@@ -111,6 +125,7 @@ pub fn init(
 /// Clean up the thread. This is only safe to call once the thread
 /// completes executing; the caller must join prior to this.
 pub fn deinit(self: *Thread) void {
+    self.scroll.deinit();
     self.coalesce.deinit();
     self.sync_reset.deinit();
     self.stop.deinit();
@@ -133,8 +148,8 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
         // the error to the surface thread and let the apprt deal with it
         // in some way but this works for now. Without this, the user would
         // just see a blank terminal window.
-        io.renderer_state.mutex.lock();
-        defer io.renderer_state.mutex.unlock();
+        io.renderer_state.mutex.lockUncancelable(global.io());
+        defer io.renderer_state.mutex.unlock(global.io());
         const t = io.renderer_state.terminal;
 
         // Hide the cursor
@@ -145,6 +160,8 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
         // have "OpenptyFailed".
         const Err = @TypeOf(err) || error{
             OpenptyFailed,
+            InputNotFound,
+            InputFailed,
         };
 
         switch (@as(Err, @errorCast(err))) {
@@ -158,6 +175,24 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
                     \\many pty devices.
                     \\
                     \\Please free up some pty devices and try again.
+                ;
+
+                t.eraseDisplay(.complete, false);
+                t.printString(str) catch {};
+            },
+
+            error.InputNotFound,
+            error.InputFailed,
+            => {
+                const str =
+                    \\A configured `input` path was not found, was not readable,
+                    \\was too large, or the underlying pty failed to accept
+                    \\the write.
+                    \\
+                    \\Ghostty can't continue since it can't guarantee that
+                    \\initial terminal state will be as desired. Please review
+                    \\the value of `input` in your configuration file and
+                    \\ensure that all the path values exist and are readable.
                 ;
 
                 t.eraseDisplay(.complete, false);
@@ -201,6 +236,13 @@ pub fn threadMain(self: *Thread, io: *termio.Termio) void {
 
 fn threadMain_(self: *Thread, io: *termio.Termio) !void {
     defer log.debug("IO thread exited", .{});
+
+    // Right now, on Darwin, `std.Thread.setName` can only name the current
+    // thread, and we have no way to get the current thread from within it,
+    // so instead we use this code to name the thread instead.
+    if (builtin.os.tag.isDarwin()) {
+        internal_os.macos.pthread_setname_np(&"io".*);
+    }
 
     // Setup our crash metadata
     crash.sentry.thread_state = .{
@@ -256,7 +298,7 @@ fn drainMailbox(
 
     // If we're draining, we just drain the mailbox and return.
     if (self.flags.drain) {
-        while (mailbox.pop()) |_| {}
+        while (mailbox.pop(global.io())) |msg| msg.deinit();
         return;
     }
 
@@ -264,12 +306,18 @@ fn drainMailbox(
     // expectation is that all our message handlers will be non-blocking
     // ENOUGH to not mess up throughput on producers.
     var redraw: bool = false;
-    while (mailbox.pop()) |message| {
+    while (mailbox.pop(global.io())) |message| {
         // If we have a message we always redraw
         redraw = true;
 
-        log.debug("mailbox message={}", .{message});
+        log.debug("mailbox message={s}", .{@tagName(message)});
         switch (message) {
+            .color_scheme_report => |v| try io.colorSchemeReport(data, v.force),
+            .visibility_report => |v| try io.visibilityReport(
+                data,
+                v.visible,
+                v.force,
+            ),
             .crash => @panic("crash request, crashing intentionally"),
             .change_config => |config| {
                 defer config.alloc.destroy(config.ptr);
@@ -279,11 +327,25 @@ fn drainMailbox(
             .resize => |v| self.handleResize(cb, v),
             .size_report => |v| try io.sizeReport(data, v),
             .clear_screen => |v| try io.clearScreen(data, v.history),
-            .scroll_viewport => |v| try io.scrollViewport(v),
+            .scroll_viewport => |v| io.scrollViewport(v),
+            .selection_scroll => |v| {
+                if (v) {
+                    self.startScrollTimer(cb);
+                } else {
+                    self.stopScrollTimer();
+                }
+            },
             .jump_to_prompt => |v| try io.jumpToPrompt(v),
+            .kitty_clipboard_grant_read => |v| {
+                defer v.alloc.free(v.pw);
+                try io.kittyClipboardGrant(v.pw, .read);
+            },
+            .kitty_clipboard_grant_write => |v| {
+                defer v.alloc.free(v.pw);
+                try io.kittyClipboardGrant(v.pw, .write);
+            },
             .start_synchronized_output => self.startSynchronizedOutput(cb),
             .linefeed_mode => |v| self.flags.linefeed_mode = v,
-            .child_exited_abnormally => |v| try io.childExitedAbnormally(v.exit_code, v.runtime_ms),
             .focused => |v| try io.focusGained(data, v),
             .write_small => |v| try io.queueWrite(
                 data,
@@ -417,5 +479,67 @@ fn stopCallback(
 ) xev.CallbackAction {
     _ = r catch unreachable;
     cb_.?.self.loop.stop();
+    return .disarm;
+}
+
+fn startScrollTimer(self: *Thread, cb: *CallbackData) void {
+    self.scroll_active = true;
+
+    switch (self.scroll_c.state()) {
+        // If it is already active, e.g. startScrollTimer is called multiple
+        // times, then we just return. We can't simply check `scroll_active`
+        // because its possible that `stopScrollTimer` was called but there
+        // was no loop tick between then and now to halt out completion.
+        .active => return,
+
+        // If the completion is not active then we need to start it.
+        .dead => self.scroll.run(
+            &self.loop,
+            &self.scroll_c,
+            selection_scroll_ms,
+            CallbackData,
+            cb,
+            selectionScrollCallback,
+        ),
+    }
+}
+
+fn stopScrollTimer(self: *Thread) void {
+    // This will stop the scrolling on the next iteration.
+    self.scroll_active = false;
+}
+
+fn selectionScrollCallback(
+    cb_: ?*CallbackData,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    r: xev.Timer.RunError!void,
+) xev.CallbackAction {
+    _ = r catch |err| switch (err) {
+        error.Canceled => {},
+        else => {
+            log.warn("error during selection scroll callback err={}", .{err});
+            return .disarm;
+        },
+    };
+
+    const cb = cb_ orelse return .disarm;
+    const self = cb.self;
+
+    // Send the tick to the main surface
+    _ = cb.io.surface_mailbox.push(
+        .{ .selection_scroll_tick = self.scroll_active },
+        .{ .instant = {} },
+    );
+
+    if (self.scroll_active) self.scroll.run(
+        &self.loop,
+        &self.scroll_c,
+        selection_scroll_ms,
+        CallbackData,
+        cb,
+        selectionScrollCallback,
+    );
+
     return .disarm;
 }

@@ -12,7 +12,7 @@ const std = @import("std");
 /// and are used to look up this terminal. Historically, the final name in the
 /// list was the most common name for the terminal and contains spaces and
 /// other characters. See terminfo(5) for details.
-names: []const []const u8,
+names: []const [:0]const u8,
 
 /// The set of capabilities in this terminfo file.
 capabilities: []const Capability,
@@ -36,14 +36,14 @@ pub const Capability = struct {
         /// because it is a common integer size but this may be wrong.
         numeric: u32,
 
-        string: []const u8,
+        string: [:0]const u8,
     };
 };
 
 /// Encode as a terminfo source file. The encoding is always done in a
 /// human-readable format with whitespace. Fields are always written in the
 /// order of the slices on this struct; this will not do any reordering.
-pub fn encode(self: Source, writer: anytype) !void {
+pub fn encode(self: Source, writer: *std.Io.Writer) !void {
     // Encode the names in the order specified
     for (self.names, 0..) |name, i| {
         if (i != 0) try writer.writeAll("|");
@@ -68,13 +68,17 @@ pub fn encode(self: Source, writer: anytype) !void {
 /// Returns a StaticStringMap for all of the capabilities in this terminfo.
 /// The value is the value that should be sent as a response to XTGETTCAP.
 /// Important: the value is the FULL response included the escape sequences.
-pub fn xtgettcapMap(comptime self: Source) std.StaticStringMap([]const u8) {
-    const KV = struct { []const u8, []const u8 };
+///
+/// The responses are null-terminated so that they can be handed directly
+/// to APIs that require a sentinel (e.g. the libghostty-vt write_pty
+/// callback) without copying.
+pub fn xtgettcapMap(comptime self: Source) std.StaticStringMap([:0]const u8) {
+    const KV = struct { []const u8, [:0]const u8 };
 
     // We have all of our capabilities plus To, TN, and RGB which aren't
     // in the capabilities list but are query-able.
     const len = self.capabilities.len + 3;
-    var kvs: [len]KV = .{.{ "", "" }} ** len;
+    var kvs: [len]KV = @splat(.{ "", "" });
 
     // We first build all of our entries with raw K=V pairs.
     kvs[0] = .{ "TN", self.names[0] };
@@ -82,7 +86,8 @@ pub fn xtgettcapMap(comptime self: Source) std.StaticStringMap([]const u8) {
     kvs[2] = .{ "RGB", "8" };
     for (self.capabilities, 3..) |cap, i| {
         kvs[i] = .{
-            cap.name, switch (cap.value) {
+            cap.name,
+            switch (cap.value) {
                 .canceled => @compileError("canceled not handled yet"),
                 .boolean => "",
                 .string => |v| string: {
@@ -114,10 +119,11 @@ pub fn xtgettcapMap(comptime self: Source) std.StaticStringMap([]const u8) {
                     break :string result;
                 },
                 .numeric => |v| numeric: {
-                    var buf: [10]u8 = undefined;
-                    const num_len = std.fmt.formatIntBuf(&buf, v, 10, .upper, .{});
+                    var buf: [11]u8 = @splat(0);
+                    var writer: std.Io.Writer = .fixed(buf[0..10]);
+                    writer.printInt(v, 10, .upper, .{}) catch unreachable;
                     const final = buf;
-                    break :numeric final[0..num_len];
+                    break :numeric final[0..writer.end :0];
                 },
             },
         };
@@ -128,8 +134,9 @@ pub fn xtgettcapMap(comptime self: Source) std.StaticStringMap([]const u8) {
         // The key is just the raw hex-encoded string
         entry[0] = hexencode(entry[0]);
 
-        // The value is more complex
-        var buf: [5 + entry[0].len + 1 + (entry[1].len * 2) + 2]u8 = undefined;
+        // The value is more complex. The buffer is zeroed so the byte
+        // after the response is already the null terminator.
+        var buf: [5 + entry[0].len + 1 + (entry[1].len * 2) + 2 + 1]u8 = @splat(0);
         const out = if (std.mem.eql(u8, entry[1], "")) std.fmt.bufPrint(
             &buf,
             "\x1bP1+r{s}\x1b\\",
@@ -141,11 +148,11 @@ pub fn xtgettcapMap(comptime self: Source) std.StaticStringMap([]const u8) {
         ) catch unreachable;
 
         const final = buf;
-        entry[1] = final[0..out.len];
+        entry[1] = final[0..out.len :0];
     }
 
     const kvs_final = kvs;
-    return std.StaticStringMap([]const u8).initComptime(&kvs_final);
+    return std.StaticStringMap([:0]const u8).initComptime(&kvs_final);
 }
 
 fn hexencode(comptime input: []const u8) []const u8 {
@@ -158,13 +165,13 @@ fn comptimeReplace(
     input: []const u8,
     needle: []const u8,
     replacement: []const u8,
-) []const u8 {
+) [:0]const u8 {
     comptime {
         const len = std.mem.replacementSize(u8, input, needle, replacement);
-        var buf: [len]u8 = undefined;
-        _ = std.mem.replace(u8, input, needle, replacement, &buf);
+        var buf: [len + 1]u8 = @splat(0);
+        _ = std.mem.replace(u8, input, needle, replacement, buf[0..len]);
         const final = buf;
-        return &final;
+        return final[0..len :0];
     }
 }
 
@@ -229,16 +236,14 @@ test "encode" {
 
     // Encode
     var buf: [1024]u8 = undefined;
-    var buf_stream = std.io.fixedBufferStream(&buf);
-    try src.encode(buf_stream.writer());
+    var writer: std.Io.Writer = .fixed(&buf);
+    try src.encode(&writer);
 
     const expected =
-        \\ghostty|xterm-ghostty|Ghostty,
-        \\	am,
-        \\	ccc@,
-        \\	colors#256,
-        \\	bel=^G,
-        \\
-    ;
-    try std.testing.expectEqualStrings(@as([]const u8, expected), buf_stream.getWritten());
+        "ghostty|xterm-ghostty|Ghostty,\n" ++
+        "\tam,\n" ++
+        "\tccc@,\n" ++
+        "\tcolors#256,\n" ++
+        "\tbel=^G,\n";
+    try std.testing.expectEqualStrings(@as([]const u8, expected), writer.buffered());
 }

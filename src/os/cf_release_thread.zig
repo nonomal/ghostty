@@ -8,7 +8,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 const macos = @import("macos");
 
-const xev = @import("../global.zig").xev;
+const internal_os = @import("../os/main.zig");
+const global = @import("../global.zig");
+const xev = global.xev;
 const BlockingQueue = @import("../datastruct/main.zig").BlockingQueue;
 
 const Allocator = std.mem.Allocator;
@@ -119,6 +121,13 @@ pub fn threadMain(self: *Thread) void {
 fn threadMain_(self: *Thread) !void {
     defer log.debug("cf release thread exited", .{});
 
+    // Right now, on Darwin, `std.Thread.setName` can only name the current
+    // thread, and we have no way to get the current thread from within it,
+    // so instead we use this code to name the thread instead.
+    if (builtin.os.tag.isDarwin()) {
+        internal_os.macos.pthread_setname_np(&"cf_release".*);
+    }
+
     // Start the async handlers. We start these first so that they're
     // registered even if anything below fails so we can drain the mailbox.
     self.wakeup.wait(&self.loop, &self.wakeup_c, Thread, self, wakeupCallback);
@@ -134,11 +143,11 @@ fn threadMain_(self: *Thread) !void {
 fn drainMailbox(self: *Thread) !void {
     // If we're draining, we just drain the mailbox and return.
     if (self.flags.drain) {
-        while (self.mailbox.pop()) |_| {}
+        while (self.mailbox.pop(global.io())) |_| {}
         return;
     }
 
-    while (self.mailbox.pop()) |message| {
+    while (self.mailbox.pop(global.io())) |message| {
         // log.debug("mailbox message={}", .{message});
         switch (message) {
             .release => |msg| {

@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const build_config = @import("../build_config.zig");
 const options = @import("main.zig").options;
-const Metrics = @import("main.zig").Metrics;
 const config = @import("../config.zig");
 const freetype = @import("face/freetype.zig");
 const coretext = @import("face/coretext.zig");
@@ -10,6 +10,7 @@ pub const web_canvas = @import("face/web_canvas.zig");
 /// Face implementation for the compile options.
 pub const Face = switch (options.backend) {
     .freetype,
+    .freetype_windows,
     .fontconfig_freetype,
     .coretext_freetype,
     => freetype.Face,
@@ -33,7 +34,7 @@ pub const FreetypeLoadFlags = if (options.backend.hasFreetype())
     config.FreetypeLoadFlags
 else
     void;
-pub const freetype_load_flags_default = if (FreetypeLoadFlags != void) .{} else {};
+pub const freetype_load_flags_default: FreetypeLoadFlags = if (FreetypeLoadFlags != void) .{} else {};
 
 /// Options for initializing a font face.
 pub const Options = struct {
@@ -51,10 +52,20 @@ pub const DesiredSize = struct {
     ydpi: u16 = default_dpi,
 
     // Converts points to pixels
-    pub fn pixels(self: DesiredSize) u16 {
+    pub fn pixels(self: DesiredSize) f32 {
         // 1 point = 1/72 inch
-        return @intFromFloat(@round((self.points * @as(f32, @floatFromInt(self.ydpi))) / 72));
+        return (self.points * @as(f32, @floatFromInt(self.ydpi))) / 72;
     }
+
+    /// Make this a valid gobject if we're in a GTK environment.
+    pub const getGObjectType = switch (build_config.app_runtime) {
+        .gtk => @import("gobject").ext.defineBoxed(
+            DesiredSize,
+            .{ .name = "GhosttyFontDesiredSize" },
+        ),
+
+        .none => void,
+    };
 };
 
 /// A font variation setting. The best documentation for this I know of
@@ -80,34 +91,6 @@ pub const Variation = struct {
             return .{ self.a, self.b, self.c, self.d };
         }
     };
-};
-
-/// Additional options for rendering glyphs.
-pub const RenderOptions = struct {
-    /// The metrics that are defining the grid layout. These are usually
-    /// the metrics of the primary font face. The grid metrics are used
-    /// by the font face to better layout the glyph in situations where
-    /// the font is not exactly the same size as the grid.
-    grid_metrics: Metrics,
-
-    /// The number of grid cells this glyph will take up. This can be used
-    /// optionally by the rasterizer to better layout the glyph.
-    cell_width: ?u2 = null,
-
-    /// Thicken the glyph. This draws the glyph with a thicker stroke width.
-    /// This is purely an aesthetic setting.
-    ///
-    /// This only works with CoreText currently.
-    thicken: bool = false,
-
-    /// "Strength" of the thickening, between `0` and `255`.
-    /// Only has an effect when `thicken` is enabled.
-    ///
-    /// `0` does not correspond to *no* thickening,
-    /// just the *lightest* thickening available.
-    ///
-    /// CoreText only.
-    thicken_strength: u8 = 255,
 };
 
 test {

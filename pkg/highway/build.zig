@@ -4,32 +4,52 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const upstream = b.dependency("highway", .{});
+    const upstream_ = b.lazyDependency("highway", .{});
 
     const module = b.addModule("highway", .{
-        .root_source_file = b.path("main.zig"),
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    const lib = b.addStaticLibrary(.{
+    const lib = b.addLibrary(.{
         .name = "highway",
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/detect.zig"),
+            .target = target,
+            .optimize = optimize,
+            // Our highway package is free of libc at runtime (uses no symbols)
+            // but does require libc headers at compile time.
+            .link_libc = true,
+        }),
+        .linkage = .static,
     });
-    lib.linkLibCpp();
-    lib.addIncludePath(upstream.path(""));
-    module.addIncludePath(upstream.path(""));
 
-    if (target.result.isDarwin()) {
-        const apple_sdk = @import("apple_sdk");
-        try apple_sdk.addPaths(b, &lib.root_module);
-        try apple_sdk.addPaths(b, module);
+    lib.root_module.addIncludePath(b.path("src/cpp"));
+    if (upstream_) |upstream| {
+        lib.root_module.addIncludePath(upstream.path(""));
+        module.addIncludePath(upstream.path(""));
     }
 
-    var flags = std.ArrayList([]const u8).init(b.allocator);
-    defer flags.deinit();
-    try flags.appendSlice(&.{
+    if (target.result.abi.isAndroid()) {
+        const android_ndk = @import("android_ndk");
+        try android_ndk.addPaths(b, lib);
+    }
+
+    // Mainly for iOS simulators, but we add for all Darwin target for
+    // consistency.
+    if (target.result.os.tag.isDarwin()) {
+        const apple_sdk = @import("apple_sdk");
+        try apple_sdk.addPaths(b, lib);
+    }
+
+    var flags: std.ArrayList([]const u8) = .empty;
+    defer flags.deinit(b.allocator);
+    try flags.appendSlice(b.allocator, &.{
+        // Highway can avoid libc++ entirely as long as all users compile
+        // against the headers with the same define.
+        "-DHWY_NO_LIBCXX",
+
         // Avoid changing binaries based on the current time and date.
         "-Wno-builtin-macro-redefined",
         "-D__DATE__=\"redacted\"",
@@ -63,43 +83,57 @@ pub fn build(b: *std.Build) !void {
         "-fno-cxx-exceptions",
         "-fno-slp-vectorize",
         "-fno-vectorize",
+
+        // Fixes linker issues for release builds missing ubsanitizer symbols
+        "-fno-sanitize=undefined",
+        "-fno-sanitize-trap=undefined",
     });
+
+    if (target.result.os.tag == .freebsd or target.result.os.tag == .linux) {
+        try flags.append(b.allocator, "-fPIC");
+        lib.root_module.pic = true;
+    }
+
     if (target.result.os.tag != .windows) {
-        try flags.appendSlice(&.{
+        try flags.appendSlice(b.allocator, &.{
             "-fmath-errno",
             "-fno-exceptions",
         });
+    } else if (target.result.abi == .msvc) {
+        try flags.appendSlice(b.allocator, &.{
+            // -fno-autolink also drops UCRT's /alternatename fallback.
+            "-D_Avx2WmemEnabledWeakValue=_Avx2WmemEnabled",
+            "-fno-autolink",
+            "-fno-stack-protector",
+        });
     }
 
-    lib.addCSourceFiles(.{ .flags = flags.items, .files = &.{"bridge.cpp"} });
-    lib.addCSourceFiles(.{
-        .root = upstream.path(""),
-        .flags = flags.items,
-        .files = &.{
-            "hwy/aligned_allocator.cc",
-            "hwy/nanobenchmark.cc",
-            "hwy/per_target.cc",
-            "hwy/print.cc",
-            "hwy/targets.cc",
-            "hwy/timer.cc",
-        },
-    });
-    lib.installHeadersDirectory(
-        upstream.path("hwy"),
-        "hwy",
-        .{ .include_extensions = &.{".h"} },
-    );
+    lib.root_module.addCSourceFiles(.{ .flags = flags.items, .files = &.{
+        "src/cpp/abort.cc",
+        "src/cpp/per_target.cc",
+        "src/cpp/targets.cpp",
+    } });
+
+    if (upstream_) |upstream| {
+        lib.installHeadersDirectory(
+            upstream.path("hwy"),
+            "hwy",
+            .{ .include_extensions = &.{".h"} },
+        );
+    }
 
     b.installArtifact(lib);
 
     {
         const test_exe = b.addTest(.{
             .name = "test",
-            .root_source_file = b.path("main.zig"),
-            .target = target,
-            .optimize = optimize,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/main.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
         });
-        test_exe.linkLibrary(lib);
+        test_exe.root_module.linkLibrary(lib);
 
         var it = module.import_table.iterator();
         while (it.next()) |entry| test_exe.root_module.addImport(entry.key_ptr.*, entry.value_ptr.*);

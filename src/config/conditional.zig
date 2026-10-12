@@ -1,6 +1,5 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
 /// Conditionals in Ghostty configuration are based on a static, typed
@@ -39,19 +38,17 @@ pub const State = struct {
 
 /// An enum of the available conditional configuration keys.
 pub const Key = key: {
-    const stateInfo = @typeInfo(State).Struct;
-    var fields: [stateInfo.fields.len]std.builtin.Type.EnumField = undefined;
-    for (stateInfo.fields, 0..) |field, i| fields[i] = .{
-        .name = field.name,
-        .value = i,
-    };
+    const stateInfo = @typeInfo(State).@"struct";
+    const TagInt = std.math.IntFittingRange(0, stateInfo.fields.len - 1);
+    var names: [stateInfo.fields.len][]const u8 = undefined;
+    var values: [stateInfo.fields.len]TagInt = undefined;
 
-    break :key @Type(.{ .Enum = .{
-        .tag_type = std.math.IntFittingRange(0, fields.len - 1),
-        .fields = &fields,
-        .decls = &.{},
-        .is_exhaustive = true,
-    } });
+    for (stateInfo.fields, &names, &values, 0..) |field, *name, *v, i| {
+        name.* = field.name;
+        v.* = @intCast(i);
+    }
+
+    break :key @Enum(TagInt, .exhaustive, &names, &values);
 };
 
 /// A single conditional that can be true or false.

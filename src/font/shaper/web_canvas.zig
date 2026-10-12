@@ -1,9 +1,10 @@
 const std = @import("std");
-const assert = std.debug.assert;
+const assert = @import("../../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
-const ziglyph = @import("ziglyph");
 const font = @import("../main.zig");
 const terminal = @import("../../terminal/main.zig");
+const unicode = @import("../../unicode/main.zig");
+const uucode = @import("uucode");
 
 const log = std.log.scoped(.font_shaper);
 
@@ -57,21 +58,15 @@ pub const Shaper = struct {
     }
 
     /// Returns an iterator that returns one text run at a time for the
-    /// given terminal row. Note that text runs are are only valid one at a time
+    /// given terminal row. Note that text runs are only valid one at a time
     /// for a Shaper struct since they share state.
     pub fn runIterator(
         self: *Shaper,
-        group: *font.GroupCache,
-        row: terminal.Screen.Row,
-        selection: ?terminal.Selection,
-        cursor_x: ?usize,
+        opts: font.shape.RunOptions,
     ) font.shape.RunIterator {
         return .{
             .hooks = .{ .shaper = self },
-            .group = group,
-            .row = row,
-            .selection = selection,
-            .cursor_x = cursor_x,
+            .opts = opts,
         };
     }
 
@@ -117,7 +112,7 @@ pub const Shaper = struct {
         // font ligatures. However, we do support grapheme clustering.
         // This means we can render things like skin tone emoji but
         // we can't render things like single glyph "=>".
-        var break_state: u3 = 0;
+        var break_state: uucode.grapheme.BreakState = .default;
         var cp1: u21 = @intCast(codepoints[0]);
 
         var start: usize = 0;
@@ -132,7 +127,7 @@ pub const Shaper = struct {
                 const cp2: u21 = @intCast(codepoints[i]);
                 defer cp1 = cp2;
 
-                break :blk ziglyph.graphemeBreak(
+                break :blk unicode.graphemeBreak(
                     cp1,
                     cp2,
                     &break_state,

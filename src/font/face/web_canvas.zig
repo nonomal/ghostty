@@ -1,6 +1,5 @@
 const std = @import("std");
-const builtin = @import("builtin");
-const assert = std.debug.assert;
+const assert = @import("../../quirks.zig").inlineAssert;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const js = @import("zig-js");
@@ -190,7 +189,7 @@ pub const Face = struct {
         alloc: Allocator,
         atlas: *font.Atlas,
         glyph_index: u32,
-        opts: font.face.RenderOptions,
+        opts: font.Glyph.RenderOptions,
     ) !font.Glyph {
         _ = opts;
 
@@ -235,7 +234,6 @@ pub const Face = struct {
             .offset_y = 0,
             .atlas_x = region.x,
             .atlas_y = region.y,
-            .advance_x = 0,
         };
     }
 

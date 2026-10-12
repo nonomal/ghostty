@@ -18,6 +18,17 @@ pub const Font = opaque {
         ) orelse Allocator.Error.OutOfMemory;
     }
 
+    pub fn createWithName(name: *foundation.String, size: f32) Allocator.Error!*Font {
+        return @as(
+            ?*Font,
+            @ptrFromInt(@intFromPtr(c.CTFontCreateWithName(
+                @ptrCast(name),
+                size,
+                null,
+            ))),
+        ) orelse Allocator.Error.OutOfMemory;
+    }
+
     pub fn createForString(
         self: *Font,
         str: *foundation.String,
@@ -68,7 +79,7 @@ pub const Font = opaque {
     }
 
     pub fn copyTable(self: *Font, tag: FontTableTag) ?*foundation.Data {
-        return @constCast(@ptrCast(c.CTFontCopyTable(
+        return @ptrCast(@constCast(c.CTFontCopyTable(
             @ptrCast(self),
             @intFromEnum(tag),
             c.kCTFontTableOptionNoOptions,
@@ -90,7 +101,7 @@ pub const Font = opaque {
     }
 
     pub fn createPathForGlyph(self: *Font, glyph: graphics.Glyph) ?*graphics.Path {
-        return @constCast(@ptrCast(c.CTFontCreatePathForGlyph(
+        return @ptrCast(@constCast(c.CTFontCreatePathForGlyph(
             @ptrCast(self),
             glyph,
             null,
@@ -156,7 +167,7 @@ pub const Font = opaque {
         return @ptrFromInt(@intFromPtr(c.CTFontCopyFamilyName(@ptrCast(self))));
     }
 
-    pub fn copyDisplayName(self: *Font) *foundation.String {
+    pub fn copyDisplayName(self: *Font) ?*foundation.String {
         return @ptrFromInt(@intFromPtr(c.CTFontCopyDisplayName(@ptrCast(self))));
     }
 
@@ -280,7 +291,8 @@ test {
         const cs = try graphics.ColorSpace.createDeviceGray();
         defer cs.release();
         const ctx = try graphics.BitmapContext.create(null, 80, 80, 8, 80, cs, 0);
-        defer ctx.release();
+        const context = graphics.BitmapContext.context;
+        defer context.release(ctx);
 
         var pos = [_]graphics.Point{.{ .x = 0, .y = 0 }};
         font.drawGlyphs(

@@ -4,39 +4,56 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const upstream = b.dependency("zlib", .{});
-
-    const lib = b.addStaticLibrary(.{
+    const lib = b.addLibrary(.{
         .name = "z",
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+        .linkage = .static,
     });
-    lib.linkLibC();
-    lib.addIncludePath(upstream.path(""));
-    if (target.result.isDarwin()) {
+    if (target.result.os.tag.isDarwin()) {
         const apple_sdk = @import("apple_sdk");
-        try apple_sdk.addPaths(b, &lib.root_module);
+        try apple_sdk.addPaths(b, lib);
     }
 
-    lib.installHeadersDirectory(
-        upstream.path(""),
-        "",
-        .{ .include_extensions = &.{".h"} },
-    );
+    if (b.lazyDependency("zlib", .{})) |upstream| {
+        lib.root_module.addIncludePath(upstream.path(""));
+        lib.installHeadersDirectory(
+            upstream.path(""),
+            "",
+            .{ .include_extensions = &.{".h"} },
+        );
 
-    var flags = std.ArrayList([]const u8).init(b.allocator);
-    defer flags.deinit();
-    try flags.appendSlice(&.{
-        "-DHAVE_SYS_TYPES_H",
-        "-DHAVE_STDINT_H",
-        "-DHAVE_STDDEF_H",
-        "-DZ_HAVE_UNISTD_H",
-    });
-    lib.addCSourceFiles(.{
-        .root = upstream.path(""),
-        .files = srcs,
-        .flags = flags.items,
-    });
+        var flags: std.ArrayList([]const u8) = .empty;
+        defer flags.deinit(b.allocator);
+        try flags.appendSlice(b.allocator, &.{
+            "-DHAVE_SYS_TYPES_H",
+            "-DHAVE_STDINT_H",
+            "-DHAVE_STDDEF_H",
+        });
+        if (target.result.abi == .msvc) {
+            try flags.appendSlice(b.allocator, &.{
+                "-fno-sanitize=undefined",
+                "-fno-sanitize-trap=undefined",
+            });
+        }
+        if (target.result.os.tag != .windows) {
+            try flags.append(b.allocator, "-DZ_HAVE_UNISTD_H");
+        }
+        if (target.result.abi == .msvc) {
+            try flags.appendSlice(b.allocator, &.{
+                "-D_CRT_SECURE_NO_DEPRECATE",
+                "-D_CRT_NONSTDC_NO_DEPRECATE",
+            });
+        }
+        lib.root_module.addCSourceFiles(.{
+            .root = upstream.path(""),
+            .files = srcs,
+            .flags = flags.items,
+        });
+    }
 
     b.installArtifact(lib);
 }

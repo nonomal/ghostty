@@ -4,22 +4,15 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const upstream = b.dependency("libpng", .{});
-
-    const lib = b.addStaticLibrary(.{
+    const lib = b.addLibrary(.{
         .name = "png",
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+        .linkage = .static,
     });
-    lib.linkLibC();
-    if (target.result.os.tag == .linux) {
-        lib.linkSystemLibrary("m");
-    }
-    if (target.result.isDarwin()) {
-        const apple_sdk = @import("apple_sdk");
-        try apple_sdk.addPaths(b, &lib.root_module);
-    }
-
     // For dynamic linking, we prefer dynamic linking and to search by
     // mode first. Mode first will search all paths for a dynamic library
     // before falling back to static.
@@ -27,37 +20,59 @@ pub fn build(b: *std.Build) !void {
         .preferred_link_mode = .dynamic,
         .search_strategy = .mode_first,
     };
-
-    if (b.systemIntegrationOption("zlib", .{})) {
-        lib.linkSystemLibrary2("zlib", dynamic_link_opts);
-    } else {
-        const zlib_dep = b.dependency("zlib", .{ .target = target, .optimize = optimize });
-        lib.linkLibrary(zlib_dep.artifact("z"));
-        lib.addIncludePath(upstream.path(""));
-        lib.addIncludePath(b.path(""));
+    if (target.result.os.tag == .linux) {
+        lib.root_module.linkSystemLibrary("m", dynamic_link_opts);
+    }
+    if (target.result.os.tag.isDarwin()) {
+        const apple_sdk = @import("apple_sdk");
+        try apple_sdk.addPaths(b, lib);
     }
 
-    var flags = std.ArrayList([]const u8).init(b.allocator);
-    defer flags.deinit();
-    try flags.appendSlice(&.{
-        "-DPNG_ARM_NEON_OPT=0",
-        "-DPNG_POWERPC_VSX_OPT=0",
-        "-DPNG_INTEL_SSE_OPT=0",
-        "-DPNG_MIPS_MSA_OPT=0",
-    });
+    if (b.systemIntegrationOption("zlib", .{})) {
+        lib.root_module.linkSystemLibrary("zlib", dynamic_link_opts);
+    } else {
+        if (b.lazyDependency(
+            "zlib",
+            .{ .target = target, .optimize = optimize },
+        )) |zlib_dep| {
+            lib.root_module.linkLibrary(zlib_dep.artifact("z"));
+            lib.root_module.addIncludePath(b.path(""));
+        }
 
-    lib.addCSourceFiles(.{
-        .root = upstream.path(""),
-        .files = srcs,
-        .flags = flags.items,
-    });
+        if (b.lazyDependency("libpng", .{})) |upstream| {
+            lib.root_module.addIncludePath(upstream.path(""));
+        }
+    }
 
-    lib.installHeader(b.path("pnglibconf.h"), "pnglibconf.h");
-    lib.installHeadersDirectory(
-        upstream.path(""),
-        "",
-        .{ .include_extensions = &.{".h"} },
-    );
+    if (b.lazyDependency("libpng", .{})) |upstream| {
+        var flags: std.ArrayList([]const u8) = .empty;
+        defer flags.deinit(b.allocator);
+        try flags.appendSlice(b.allocator, &.{
+            "-DPNG_ARM_NEON_OPT=0",
+            "-DPNG_POWERPC_VSX_OPT=0",
+            "-DPNG_INTEL_SSE_OPT=0",
+            "-DPNG_MIPS_MSA_OPT=0",
+        });
+        if (target.result.abi == .msvc) {
+            try flags.appendSlice(b.allocator, &.{
+                "-fno-sanitize=undefined",
+                "-fno-sanitize-trap=undefined",
+            });
+        }
+
+        lib.root_module.addCSourceFiles(.{
+            .root = upstream.path(""),
+            .files = srcs,
+            .flags = flags.items,
+        });
+
+        lib.installHeader(b.path("pnglibconf.h"), "pnglibconf.h");
+        lib.installHeadersDirectory(
+            upstream.path(""),
+            "",
+            .{ .include_extensions = &.{".h"} },
+        );
+    }
 
     b.installArtifact(lib);
 }
